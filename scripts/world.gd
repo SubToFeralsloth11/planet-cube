@@ -2,6 +2,10 @@ extends Node3D
 ## Voxel planet: storage, generation, meshing, lighting helpers and raycasts.
 
 signal tnt_lit(pos: Vector3)
+## Water met lava and hardened a cell into cobble or obsidian.
+signal liquid_fused(pos: Vector3)
+## A torch lost the block it hung on and popped off (main turns it into an item drop).
+signal torch_popped(pos: Vector3)
 
 const W := 128
 const WW := 16384
@@ -42,6 +46,33 @@ var light_anchor := Vector3.ZERO
 ## Generated landmarks: [{name, sub, pos: Vector3 (world), radius}]. Rebuilt every generate().
 var structures: Array = []
 var _gen_lights: Array[int] = []
+## Chest contents: voxel index -> Array of 27 slots (null or {"id", "n"}). Generated loot + player edits.
+var chests := {}
+## Furnace state: voxel index -> {"in", "fuel", "out" (slots), "burn", "burn_max", "prog" (seconds)}.
+var furnaces := {}
+## Wall-mounted torches: voxel index -> Vector3i pointing from the torch into the wall it hangs on.
+## Torches not listed stand on the floor.
+var torch_wall := {}
+## Flowing liquid level per voxel index (1..7, falling = 7); liquid cells absent here are sources.
+var flow := {}
+var _wq := {}
+var _lq := {}
+var _wt := 0.0
+var _lt := 0.0
+
+const WATER_STEP := 0.25
+const LAVA_STEP := 1.0
+
+const CHEST_SLOTS := 27
+## Loot rolls per structure: [item, min, max, chance].
+var loot_tables := {
+	"village": [[B.APPLE, 1, 4, 0.7], [B.RAW_MEAT, 1, 3, 0.5], [B.COAL, 2, 8, 0.6], [B.TORCH, 2, 8, 0.6], [B.STICK, 2, 6, 0.5],
+		[B.IRON_INGOT, 1, 3, 0.35], [B.WOOL_WHITE, 1, 4, 0.4], [B.STONE_PICK, 1, 1, 0.25], [B.STONE_SWORD, 1, 1, 0.2], [B.COOKED_MEAT, 1, 3, 0.3]],
+	"ruins": [[B.IRON_INGOT, 2, 6, 0.8], [B.GOLD_INGOT, 1, 5, 0.6], [B.DIAMOND, 1, 2, 0.45], [B.GUNPOWDER, 1, 4, 0.5], [B.COAL, 3, 10, 0.6],
+		[B.IRON_PICK, 1, 1, 0.3], [B.IRON_SWORD, 1, 1, 0.3], [B.TORCH, 4, 12, 0.5], [B.COOKED_MEAT, 2, 4, 0.5], [B.STARCORE, 1, 1, 0.08]],
+	"pyramid": [[B.GOLD_INGOT, 3, 8, 0.9], [B.DIAMOND, 1, 4, 0.7], [B.TNT, 1, 3, 0.5], [B.GUNPOWDER, 2, 6, 0.6], [B.APPLE, 2, 5, 0.5],
+		[B.DIAMOND_SWORD, 1, 1, 0.15], [B.IRON_INGOT, 2, 6, 0.6], [B.LAMP, 1, 4, 0.4]],
+}
 
 var _fc := []
 var _fao := []
@@ -212,6 +243,12 @@ func _vol(n: FastNoiseLite) -> PackedByteArray:
 
 func generate(seed_val: int, progress: Callable) -> void:
 	world_seed = seed_val
+	chests.clear()
+	furnaces.clear()
+	torch_wall.clear()
+	flow.clear()
+	_wq.clear()
+	_lq.clear()
 	blocks.resize(W * WW)
 	blocks.fill(0)
 	hmap.resize(6 * WW)
@@ -252,6 +289,25 @@ func generate(seed_val: int, progress: Callable) -> void:
 func apply_edits() -> void:
 	for k in edits:
 		blocks[k] = edits[k]
+
+
+## Flowing cells for the save: voxel index -> Vector2i(liquid id, level).
+func save_flow() -> Dictionary:
+	var out := {}
+	for k in flow:
+		out[k] = Vector2i(blocks[k], flow[k])
+	return out
+
+
+## Restores `save_flow()` output after apply_edits() and wakes saved liquids so unfinished flows resume.
+func load_flow(d: Dictionary) -> void:
+	for k in d:
+		var v: Vector2i = d[k]
+		blocks[k] = v.x
+		flow[k] = v.y
+		_wake_one(k)
+	for k in edits:
+		_wake_one(k)
 
 
 func finish_build(progress: Callable) -> void:
@@ -407,16 +463,17 @@ func _gen_face(f: int, cave1: PackedByteArray, cave2: PackedByteArray, ore: Pack
 				if b == B.STONE or (b == B.BASALT and depth > 4) or (b == B.SANDSTONE and depth > 5):
 					var o := int(ore[i])
 					var hs := ((i * 73856093) ^ seedmix) & 1023
-					if o > 186:
+					# Veins only where the ore noise peaks; rarer ores take a small slice of each band.
+					if o > 207:
 						if l >= 27:
-							b = B.COAL_ORE if hs < 700 else B.IRON_ORE
+							b = B.COAL_ORE if hs < 760 else B.IRON_ORE
 						elif l >= 20:
-							b = B.IRON_ORE if hs < 450 else (B.COAL_ORE if hs < 700 else B.GOLD_ORE)
+							b = B.IRON_ORE if hs < 520 else (B.COAL_ORE if hs < 820 else B.GOLD_ORE)
 						else:
-							b = B.IRON_ORE if hs < 300 else (B.GOLD_ORE if hs < 620 else B.DIAMOND_ORE)
-						if bio == ASHLANDS and hs > 960 and l < 30:
+							b = B.IRON_ORE if hs < 520 else (B.GOLD_ORE if hs < 860 else B.DIAMOND_ORE)
+						if bio == ASHLANDS and hs > 990 and l < 30:
 							b = B.DIAMOND_ORE
-						elif bio == DESERT and hs > 940 and l < 32:
+						elif bio == DESERT and hs > 975 and l < 32:
 							b = B.GOLD_ORE
 					elif o < 34 and depth > 5:
 						b = B.GRAVEL
@@ -569,7 +626,7 @@ func _structures() -> void:
 	_gen_lights.clear()
 	var rng := RandomNumberGenerator.new()
 	rng.seed = world_seed + 4242
-	_village(2, C + 15, C - 13, rng)
+	_village(2, C + 12, C - 12, rng)
 	_village(5, C + rng.randi_range(-6, 6), C + rng.randi_range(-6, 6), rng)
 	_pyramid(1, C + rng.randi_range(-6, 6), C + rng.randi_range(-6, 6), rng)
 	_ruins(2, C - 12, C + 12, 23, rng)
@@ -582,8 +639,46 @@ func _place(f: int, u: int, v: int, l: int, b: int) -> void:
 		_gen_lights.append(fidx(f, u, v, l))
 
 
+## Torch hung on the wall that lies one step (du, dv) away on the same layer.
+func _wall_torch(f: int, u: int, v: int, l: int, du: int, dv: int) -> void:
+	_place(f, u, v, l, B.TORCH)
+	torch_wall[fidx(f, u, v, l)] = Vector3i(_fpos(f, u + du, v + dv, l) - _fpos(f, u, v, l))
+
+
 func _peek(f: int, u: int, v: int, l: int) -> int:
 	return blocks[fidx(f, u, v, l)]
+
+
+## State of the furnace at voxel index `i` (created empty on first access).
+func furnace_at(i: int) -> Dictionary:
+	if not furnaces.has(i):
+		furnaces[i] = {"in": null, "fuel": null, "out": null, "burn": 0.0, "burn_max": 0.0, "prog": 0.0}
+	return furnaces[i]
+
+
+## Contents of the chest at voxel index `i` (created empty on first access).
+func chest_inv(i: int) -> Array:
+	if not chests.has(i):
+		var a := []
+		a.resize(CHEST_SLOTS)
+		chests[i] = a
+	return chests[i]
+
+
+## Places a chest and fills it with 3-7 rolls from a loot table, scattered across random slots.
+func _loot_chest(f: int, u: int, v: int, l: int, table: String, rng: RandomNumberGenerator) -> void:
+	_place(f, u, v, l, B.CHEST)
+	var inv := []
+	inv.resize(CHEST_SLOTS)
+	var rolls: Array = loot_tables[table]
+	for k in rng.randi_range(3, 7):
+		var r: Array = rolls[rng.randi_range(0, rolls.size() - 1)]
+		if rng.randf() > r[3]:
+			continue
+		var slot := rng.randi_range(0, CHEST_SLOTS - 1)
+		if inv[slot] == null:
+			inv[slot] = {"id": r[0], "n": mini(rng.randi_range(r[1], r[2]), B.stack_max(r[0]))}
+	chests[fidx(f, u, v, l)] = inv
 
 
 func _fpos(f: int, u: int, v: int, l: int) -> Vector3:
@@ -595,24 +690,46 @@ func _h(f: int, u: int, v: int) -> int:
 	return hmap[(f * W + u) * W + v]
 
 
-## Levels the ground: solid foundation below `base`, air from `base` to base+height.
+## Average ground height over a square, so a site on a slope settles in the middle instead of at one corner.
+func _avg_h(f: int, u0: int, v0: int, rad: int) -> int:
+	var sum := 0
+	var n := 0
+	for du in range(-rad, rad + 1, 2):
+		for dv in range(-rad, rad + 1, 2):
+			sum += _h(f, u0 + du, v0 + dv)
+			n += 1
+	return roundi(float(sum) / n)
+
+
+## Levels a building site at `base` and blends it into the land around it: hills are cut back in
+## one-block terraces and dips are filled the same way over a 7-block margin, so the site never ends
+## up buried inside a hill or perched on a cliff. Everything above the cut (trees, hill tops) is cleared.
 func _flatten(f: int, u0: int, v0: int, rad: int, base: int, height: int, top: int, fill: int) -> void:
-	for du in range(-rad, rad + 1):
-		for dv in range(-rad, rad + 1):
+	var margin := 7
+	for du in range(-rad - margin, rad + margin + 1):
+		for dv in range(-rad - margin, rad + margin + 1):
 			var u := u0 + du
 			var v := v0 + dv
-			for l in range(base - 6, base - 1):
+			if absi(u - C) > R - 2 or absi(v - C) > R - 2:
+				continue
+			var extra := maxi(0, maxi(absi(du), absi(dv)) - rad)
+			var col := _h(f, u, v)
+			# Highest allowed ground here and lowest ground we fill up to.
+			var cap := base + extra
+			var floor_l := base - extra
+			var surface := clampi(col, floor_l, cap)
+			if extra > 0 and col >= floor_l and col <= cap:
+				continue
+			for l in range(surface - 7, surface - 1):
 				if B.SOLID[_peek(f, u, v, l)] == 0:
 					_place(f, u, v, l, fill)
-			_place(f, u, v, base - 1, top)
-			for l in range(base, base + height):
+			_place(f, u, v, surface - 1, top)
+			for l in range(surface, maxi(col, surface + (height if extra == 0 else 0)) + 12):
 				_place(f, u, v, l, B.AIR)
 
 
 func _village(f: int, cu: int, cv: int, rng: RandomNumberGenerator) -> void:
-	var base := _h(f, cu, cv)
-	if base <= SEA + 1:
-		base = SEA + 2
+	var base := maxi(_avg_h(f, cu, cv, 12), SEA + 2)
 	var ground: int = B.SNOW if FACE_BIOME[f] == TUNDRA else B.GRASS
 	_flatten(f, cu, cv, 13, base, 10, ground, B.DIRT)
 	# Well in the middle.
@@ -671,7 +788,7 @@ func _house(f: int, u0: int, v0: int, base: int, door: Vector2i, rng: RandomNumb
 	# Door gap on the side facing the well.
 	for l in [base, base + 1]:
 		_place(f, u0 + door.x * 3, v0 + door.y * 3, l, B.AIR)
-	_place(f, u0 + door.x * 4, v0 + door.y * 4, base + 2, B.TORCH)
+	_wall_torch(f, u0 + door.x * 4, v0 + door.y * 4, base + 2, -door.x, -door.y)
 	# Stepped roof.
 	for k in 4:
 		var rad := 4 - k
@@ -684,7 +801,8 @@ func _house(f: int, u0: int, v0: int, base: int, door: Vector2i, rng: RandomNumb
 	_place(f, u0 - door.x * 2 + side.x * 2, v0 - door.y * 2 + side.y * 2, base, B.CRAFTING_TABLE)
 	_place(f, u0 - door.x * 2 - side.x * 2, v0 - door.y * 2 - side.y * 2, base, B.FURNACE)
 	_place(f, u0 - door.x * 2, v0 - door.y * 2, base, B.WOOL_RED if rng.randf() < 0.5 else B.WOOL_BLUE)
-	_place(f, u0 + side.x * 2, v0 + side.y * 2, base + 2, B.TORCH)
+	_wall_torch(f, u0 + side.x * 2, v0 + side.y * 2, base + 2, side.x, side.y)
+	_loot_chest(f, u0 - door.x * 2 + side.x, v0 - door.y * 2 + side.y, base, "village", rng)
 
 
 ## Buried stone-brick hall with broken pillars, ore loot and a stairway up to the surface.
@@ -717,6 +835,8 @@ func _ruins(f: int, cu: int, cv: int, l0: int, rng: RandomNumberGenerator) -> vo
 		for dv in range(-1, 2):
 			_place(f, cu + du, cv + dv, l0, B.SMOOTH_STONE)
 	_place(f, cu, cv, l0 + 1, B.GOLD_BLOCK)
+	_loot_chest(f, cu - 3, cv - 3, l0, "ruins", rng)
+	_loot_chest(f, cu + 3, cv + 3, l0, "ruins", rng)
 	_place(f, cu + 1, cv, l0 + 1, B.DIAMOND_ORE)
 	_place(f, cu - 1, cv, l0 + 1, B.GOLD_ORE)
 	_place(f, cu, cv + 1, l0 + 1, B.IRON_ORE)
@@ -733,7 +853,7 @@ func _ruins(f: int, cu: int, cv: int, l0: int, rng: RandomNumberGenerator) -> vo
 			for k in range(0, 3):
 				_place(f, u, cv + dv, l + k, B.AIR)
 		if steps % 6 == 3:
-			_place(f, u, cv + 2, l + 1, B.TORCH)
+			_wall_torch(f, u, cv + 2, l + 1, 0, 1)
 		if l >= _h(f, u, cv) + 1:
 			break
 		u += 1
@@ -751,8 +871,8 @@ func _ruins(f: int, cu: int, cv: int, l0: int, rng: RandomNumberGenerator) -> vo
 
 ## Hollow sandstone pyramid with a striped band, a torch-lit chamber and a hidden vault below the floor.
 func _pyramid(f: int, cu: int, cv: int, rng: RandomNumberGenerator) -> void:
-	var base := maxi(_h(f, cu, cv), SEA + 2)
-	_flatten(f, cu, cv, 9, base, 12, B.SANDSTONE, B.SANDSTONE)
+	var base := maxi(_avg_h(f, cu, cv, 8), SEA + 2)
+	_flatten(f, cu, cv, 9, base, 12, B.SAND, B.SANDSTONE)
 	var size := 8
 	for k in size + 1:
 		var rad := size - k
@@ -766,8 +886,8 @@ func _pyramid(f: int, cu: int, cv: int, rng: RandomNumberGenerator) -> void:
 	for k in range(1, 3):
 		_place(f, cu + size, cv, base + k, B.AIR)
 		_place(f, cu + size - 1, cv, base + k, B.AIR)
-	_place(f, cu + size + 1, cv + 1, base + 1, B.TORCH)
-	_place(f, cu + size + 1, cv - 1, base + 1, B.TORCH)
+	_wall_torch(f, cu + size, cv + 1, base + 1, -1, 0)
+	_wall_torch(f, cu + size, cv - 1, base + 1, -1, 0)
 	for c in [Vector2i(-4, -4), Vector2i(4, -4), Vector2i(-4, 4), Vector2i(4, 4)]:
 		_place(f, cu + c.x, cv + c.y, base + 1, B.TORCH)
 	# Hidden vault: dig through the plain floor in the middle.
@@ -777,6 +897,9 @@ func _pyramid(f: int, cu: int, cv: int, rng: RandomNumberGenerator) -> void:
 				var shell := absi(du) == 3 or absi(dv) == 3 or l == base - 6
 				_place(f, cu + du, cv + dv, l, B.SANDSTONE if shell else B.AIR)
 	_place(f, cu, cv, base - 5, B.DIAMOND_BLOCK if rng.randf() < 0.5 else B.GOLD_BLOCK)
+	_loot_chest(f, cu - 1, cv - 2, base - 5, "pyramid", rng)
+	_loot_chest(f, cu + 1, cv + 2, base - 5, "pyramid", rng)
+	_loot_chest(f, cu + 4, cv + 2, base + 1, "village", rng)
 	for c in [Vector2i(-2, -2), Vector2i(2, -2), Vector2i(-2, 2), Vector2i(2, 2)]:
 		_place(f, cu + c.x, cv + c.y, base - 5, B.GOLD_ORE)
 		_place(f, cu + c.x, cv + c.y, base - 3, B.LAMP)
@@ -856,8 +979,16 @@ func set_block(x: int, y: int, z: int, id: int, record := true) -> void:
 	var i := x + (y << 7) + (z << 14)
 	var old := blocks[i]
 	if old == id:
+		if flow.has(i):
+			# A source placed over flowing liquid of the same kind.
+			flow.erase(i)
+			if record:
+				edits[i] = id
+			mark_dirty_box(x - 1, y - 1, z - 1, x + 1, y + 1, z + 1)
+			_wake(i)
 		return
 	blocks[i] = id
+	flow.erase(i)
 	if record:
 		edits[i] = id
 	if B.LIGHT[old] > 0.0:
@@ -867,6 +998,34 @@ func set_block(x: int, y: int, z: int, id: int, record := true) -> void:
 	if B.OCCLUDE[old] != B.OCCLUDE[id]:
 		_update_top(x, y, z)
 	mark_dirty_box(x - 1, y - 1, z - 1, x + 1, y + 1, z + 1)
+	_wake(i)
+	if old == B.TORCH:
+		torch_wall.erase(i)
+	if B.SOLID[old] == 1 and B.SOLID[id] == 0:
+		_pop_unsupported_torches(i)
+
+
+func _offset(d: Vector3i) -> int:
+	return d.x + (d.y << 7) + (d.z << 14)
+
+
+## Index of the block a torch at `i` rests on: the wall it hangs on, or the floor under it.
+func torch_support(i: int) -> int:
+	if torch_wall.has(i):
+		return i + _offset(torch_wall[i])
+	var vf := voxel_face(i & 127, (i >> 7) & 127, i >> 14)
+	return i - _offset(Vector3i(UPS[vf[0]]))
+
+
+func _pop_unsupported_torches(i: int) -> void:
+	for k in 6:
+		var n: int = i + NOFF[k]
+		if n < 0 or n >= blocks.size() or blocks[n] != B.TORCH:
+			continue
+		if torch_support(n) == i:
+			var p := Vector3(n & 127, (n >> 7) & 127, n >> 14)
+			set_block(int(p.x), int(p.y), int(p.z), B.AIR)
+			torch_popped.emit(p + Vector3(0.5, 0.5, 0.5))
 
 
 func _update_top(x: int, y: int, z: int) -> void:
@@ -912,12 +1071,14 @@ func _chunk_dist(ci: int) -> float:
 	return c.distance_squared_to(light_anchor)
 
 
-func explode(center: Vector3, radius: float) -> void:
+## Blasts a sphere of blocks away. Returns [[Vector3 cell centre, block id], ...] of what was destroyed.
+func explode(center: Vector3, radius: float) -> Array:
 	var r := ceili(radius)
 	var cx := floori(center.x)
 	var cy := floori(center.y)
 	var cz := floori(center.z)
 	var cols := {}
+	var gone := []
 	for dz in range(-r, r + 1):
 		for dy in range(-r, r + 1):
 			for dx in range(-r, r + 1):
@@ -936,7 +1097,9 @@ func explode(center: Vector3, radius: float) -> void:
 				if b == B.TNT:
 					tnt_lit.emit(Vector3(x + 0.5, y + 0.5, z + 0.5))
 				blocks[i] = B.AIR
+				gone.append([Vector3(x + 0.5, y + 0.5, z + 0.5), b])
 				edits[i] = B.AIR
+				_wake(i)
 				if B.LIGHT[b] > 0.0:
 					_remove_light(i)
 				var vf := voxel_face(x, y, z)
@@ -945,6 +1108,7 @@ func explode(center: Vector3, radius: float) -> void:
 		var p: Vector3i = cols[k]
 		_update_top(p.x, p.y, p.z)
 	mark_dirty_box(cx - r - 1, cy - r - 1, cz - r - 1, cx + r + 1, cy + r + 1, cz + r + 1)
+	return gone
 
 
 func _add_light(i: int, id: int) -> void:
@@ -985,9 +1149,222 @@ func _process(delta: float) -> void:
 			l.visible = l.position.distance_squared_to(light_anchor) < 3600.0
 
 
+# ---------------- liquids ----------------
+
+## Is (x,y,z) a water/lava source (as opposed to flowing liquid or anything else)?
+func is_source(x: int, y: int, z: int) -> bool:
+	var b := get_b(x, y, z)
+	return (b == B.WATER or b == B.LAVA) and not flow.has(idx_of(x, y, z))
+
+
+## Advances liquid flow: water steps every WATER_STEP, lava every LAVA_STEP, each step bounded by `budget_ms`.
+func flow_tick(dt: float, budget_ms := 3) -> void:
+	_wt += dt
+	_lt += dt
+	if _wt >= WATER_STEP:
+		_wt = minf(_wt - WATER_STEP, WATER_STEP)
+		var cur := _wq
+		_wq = {}
+		_step_queue(cur, budget_ms)
+	if _lt >= LAVA_STEP:
+		_lt = minf(_lt - LAVA_STEP, LAVA_STEP)
+		var cur := _lq
+		_lq = {}
+		_step_queue(cur, budget_ms)
+
+
+## Number of liquid cells waiting for an update.
+func flow_pending() -> int:
+	return _wq.size() + _lq.size()
+
+
+func _step_queue(cur: Dictionary, budget_ms: int) -> void:
+	var t0 := Time.get_ticks_usec()
+	var keys := cur.keys()
+	for n in keys.size():
+		_eval(keys[n])
+		if Time.get_ticks_usec() - t0 > budget_ms * 1000:
+			for k in range(n + 1, keys.size()):
+				_wake_one(keys[k])
+			return
+
+
+func _wake_one(i: int) -> void:
+	if i < 0 or i >= blocks.size():
+		return
+	var b := blocks[i]
+	if b == B.WATER:
+		_wq[i] = true
+	elif b == B.LAVA:
+		_lq[i] = true
+
+
+func _wake(i: int) -> void:
+	_wake_one(i)
+	for k in 6:
+		_wake_one(i + NOFF[k])
+
+
+## Face index (into UPS/NOFF) of voxel index `i`; NOFF[face ^ 1] is its "down" step.
+static func _face_i(i: int) -> int:
+	var dx := 2 * (i & 127) + 1 - 2 * C
+	var dy := 2 * ((i >> 7) & 127) + 1 - 2 * C
+	var dz := 2 * (i >> 14) + 1 - 2 * C
+	var qx := absi(dx)
+	var qy := absi(dy)
+	var qz := absi(dz)
+	if qx >= qy and qx >= qz:
+		return 0 if dx > 0 else 1
+	if qy >= qz:
+		return 2 if dy > 0 else 3
+	return 4 if dz > 0 else 5
+
+
+## Liquid may wash this block away (air, plants, torches).
+static func _replaceable(b: int) -> bool:
+	return b == B.AIR or B.RENDER[b] == B.R_CROSS or B.RENDER[b] == B.R_TORCH
+
+
+func _touches(i: int, id: int) -> bool:
+	for k in 6:
+		if blocks[i + NOFF[k]] == id:
+			return true
+	return false
+
+
+func _touches_flowing_lava(i: int) -> bool:
+	for k in 6:
+		var n: int = i + NOFF[k]
+		if blocks[n] == B.LAVA and flow.has(n):
+			return true
+	return false
+
+
+## Liquid `b` at `i` (on face `f`) pours downward instead of spreading sideways.
+func _falls(i: int, b: int, f: int) -> bool:
+	var dn: int = i + NOFF[f ^ 1]
+	var below := blocks[dn]
+	if below == b:
+		return flow.has(dn)
+	return _replaceable(below) or below == B.WATER or below == B.LAVA
+
+
+## Level a flowing cell should have from its neighbours: 8 = becomes a source, 7 = fed from above, 0 = drains.
+func _feed(i: int, b: int, f: int) -> int:
+	var step := 2 if b == B.LAVA else 1
+	var best := 0
+	var srcs := 0
+	for k in 6:
+		if k >> 1 == f >> 1:
+			continue
+		var n: int = i + NOFF[k]
+		if blocks[n] != b:
+			continue
+		var nl: int = flow.get(n, 8)
+		if nl == 8:
+			srcs += 1
+		var nf := _face_i(n)
+		if k >> 1 == nf >> 1 or _falls(n, b, nf):
+			continue
+		best = maxi(best, nl - step)
+	if b == B.WATER and srcs >= 2:
+		var below := blocks[i + NOFF[f ^ 1]]
+		if B.SOLID[below] == 1 or below == B.WATER:
+			return 8
+	var up: int = i + NOFF[f]
+	if blocks[up] == b and up + NOFF[_face_i(up) ^ 1] == i:
+		return 7
+	return best
+
+
+func _eval(i: int) -> void:
+	var b := blocks[i]
+	if b != B.WATER and b != B.LAVA:
+		return
+	if b == B.LAVA and _touches(i, B.WATER):
+		_fuse(i, B.COBBLE if flow.has(i) else B.OBSIDIAN)
+		return
+	var f := _face_i(i)
+	var lvl := 8
+	if flow.has(i):
+		lvl = _feed(i, b, f)
+		if lvl <= 0:
+			_flow_set(i, B.AIR, 0)
+			return
+		if lvl == 8:
+			flow.erase(i)
+			edits[i] = b
+			_flow_changed(i)
+		elif lvl != flow[i]:
+			flow[i] = lvl
+			_flow_changed(i)
+	if _falls(i, b, f):
+		_push(i + NOFF[f ^ 1], b, 7)
+		return
+	var out := lvl - (2 if b == B.LAVA else 1)
+	if out <= 0:
+		return
+	for k in 6:
+		if k >> 1 != f >> 1:
+			_push(i + NOFF[k], b, out)
+
+
+## Liquid `b` tries to flow into cell `t` at level `lvl`; meeting the other liquid hardens it.
+func _push(t: int, b: int, lvl: int) -> void:
+	var tb := blocks[t]
+	if tb == b:
+		if flow.get(t, 8) < lvl:
+			_wake_one(t)
+		return
+	if b == B.LAVA:
+		if _replaceable(tb):
+			if _touches(t, B.WATER):
+				_fuse(t, B.COBBLE)
+			else:
+				_flow_set(t, B.LAVA, lvl)
+		return
+	if tb == B.LAVA:
+		if flow.has(t):
+			_fuse(t, B.COBBLE)
+		else:
+			_wake_one(t)
+		return
+	if _replaceable(tb):
+		if _touches_flowing_lava(t):
+			_fuse(t, B.COBBLE)
+		else:
+			_flow_set(t, B.WATER, lvl)
+
+
+## Sets a flowing cell (or drains one with AIR) without recording it as a player edit.
+func _flow_set(i: int, id: int, lvl: int) -> void:
+	var old := blocks[i]
+	if old != B.AIR and old != B.WATER and old != B.LAVA:
+		edits[i] = B.AIR
+	set_block(i & 127, (i >> 7) & 127, i >> 14, id, false)
+	if id != B.AIR and blocks[i] == id:
+		flow[i] = lvl
+
+
+func _flow_changed(i: int) -> void:
+	var x := i & 127
+	var y := (i >> 7) & 127
+	var z := i >> 14
+	mark_dirty_box(x - 1, y - 1, z - 1, x + 1, y + 1, z + 1)
+	_wake(i)
+
+
+func _fuse(i: int, id: int) -> void:
+	var x := i & 127
+	var y := (i >> 7) & 127
+	var z := i >> 14
+	set_block(x, y, z, id)
+	liquid_fused.emit(Vector3(x + 0.5, y + 0.5, z + 0.5))
+
+
 # ---------------- raycast ----------------
 
-func raycast(o: Vector3, d: Vector3, maxd: float) -> Dictionary:
+func raycast(o: Vector3, d: Vector3, maxd: float, liquids := false) -> Dictionary:
 	var x := floori(o.x)
 	var y := floori(o.y)
 	var z := floori(o.z)
@@ -1005,7 +1382,7 @@ func raycast(o: Vector3, d: Vector3, maxd: float) -> Dictionary:
 	while t <= maxd:
 		if x >= 0 and y >= 0 and z >= 0 and x < W and y < W and z < W:
 			var b := blocks[x + (y << 7) + (z << 14)]
-			if b != 0 and B.TARGET[b] == 1:
+			if b != 0 and (B.TARGET[b] == 1 or (liquids and (b == B.WATER or b == B.LAVA))):
 				return {"pos": Vector3i(x, y, z), "normal": n, "block": b, "dist": t}
 		if tmx < tmy and tmx < tmz:
 			x += sx
@@ -1070,7 +1447,10 @@ func _build_chunk(ci: int) -> void:
 					if opq[nb] == 1:
 						continue
 					if rt == B.R_WATER:
-						if nb == B.WATER or nb == B.LAVA:
+						if nb == B.LAVA:
+							continue
+						# Water faces between cells are hidden, except a sideways face down to lower flowing water.
+						if nb == B.WATER and (flow.is_empty() or f >> 1 == ua or flow.get(i + NOFF[f], 8) >= flow.get(i, 8)):
 							continue
 					elif rt == B.R_LAVA:
 						if nb == B.LAVA:
@@ -1101,9 +1481,9 @@ func _quad(i: int, x: int, y: int, z: int, f: int, b: int, ua: int, us: int, rt:
 	var emit := B.EMIT[b]
 	var wat := rt == B.R_WATER
 	var anim := 1.0 if (wat or rt == B.R_LAVA) else 0.0
-	var lower := false
-	if wat:
-		lower = blocks[i + STRIDE[ua] * us] != B.WATER
+	var drop := 0.0
+	if wat and blocks[i + STRIDE[ua] * us] != B.WATER:
+		drop = 1.0 - 0.11 * flow[i] if flow.has(i) else 0.12
 	var corners: Array = _fc[f]
 	var aos: Array = _fao[f]
 	var occ := B.OCCLUDE
@@ -1120,8 +1500,8 @@ func _quad(i: int, x: int, y: int, z: int, f: int, b: int, ua: int, us: int, rt:
 	for k in 4:
 		var co: Vector3 = corners[k]
 		var p := base + co
-		if lower and co[ua] == top_val:
-			p[ua] -= 0.12 * us
+		if drop > 0.0 and co[ua] == top_val:
+			p[ua] -= drop * us
 		var uv: Vector2
 		if a == ua:
 			uv = Vector2(co[b1], co[b2])
@@ -1175,6 +1555,8 @@ func _cross(i: int, x: int, y: int, z: int, b: int, ua: int, us: int) -> void:
 	var col := Color(0.92, vis, emit, 1.0)
 	var lo := 0.15
 	var hi := 0.85
+	# Wall torches lean out of the wall: foot pushed into it, tip less so, and the whole torch raised.
+	var wall := Vector3(torch_wall[i]) if (b == B.TORCH and torch_wall.has(i)) else Vector3.ZERO
 	for plane in 2:
 		var s0 := Vector2(lo, lo) if plane == 0 else Vector2(hi, lo)
 		var s1 := Vector2(hi, hi) if plane == 0 else Vector2(lo, hi)
@@ -1185,6 +1567,10 @@ func _cross(i: int, x: int, y: int, z: int, b: int, ua: int, us: int) -> void:
 			p[ta] += s.x
 			p[tb] += s.y
 			p[ua] += q[1]
+			if wall != Vector3.ZERO:
+				var foot: bool = q[1] == bot
+				p += wall * (0.36 if foot else 0.14)
+				p[ua] += 0.2 * us
 			pts.append(p)
 		var start := _sv.size()
 		var uvs := [Vector2(0, 1), Vector2(1, 1), Vector2(1, 0), Vector2(0, 0)]

@@ -7,7 +7,6 @@ var done := false
 
 
 func _initialize() -> void:
-	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://planet_cube.save"))
 	main = load("res://main.tscn").instantiate()
 	root.add_child(main)
 
@@ -49,7 +48,12 @@ func _process(_dt: float) -> bool:
 				var glass := _count(w, p, 13, Bx.GLASS)
 				var tables := _count(w, p, 13, Bx.CRAFTING_TABLE)
 				var torches := _count(w, p, 13, Bx.TORCH)
-				all_ok = _check(glass >= 8 and tables >= 4 and torches >= 6, "village %v glass=%d tables=%d torches=%d" % [p, glass, tables, torches]) and all_ok
+				# The well has a roof; sample the open plaza around it.
+				var sky := 0.0
+				for d in [Vector3(3, 0, 0), Vector3(-3, 0, 0), Vector3(0, 3, 0), Vector3(0, -3, 0), Vector3(0, 0, 3), Vector3(0, 0, -3)]:
+					if Bx.SOLID[w.block_at(p + d)] == 0:
+						sky = maxf(sky, w.sky_vis_at(p + d))
+				all_ok = _check(glass >= 8 and tables >= 4 and torches >= 6 and sky > 0.9, "village %v glass=%d tables=%d torches=%d sky=%.2f (not buried in a hill)" % [p, glass, tables, torches, sky]) and all_ok
 			"Ancient Ruins":
 				var bricks := _count(w, p, 8, Bx.STONE_BRICKS)
 				var loot := _count(w, p, 3, Bx.GOLD_BLOCK) + _count(w, p, 3, Bx.DIAMOND_ORE)
@@ -75,6 +79,16 @@ func _process(_dt: float) -> bool:
 				break
 	all_ok = _check(lights >= 10, "structure torches/lamps emit light (%d lights)" % lights) and all_ok
 	all_ok = _check(Bx.EMIT[Bx.DIAMOND_ORE] == 0.0, "diamond ore does not glow in the dark") and all_ok
+	var filled := 0
+	var placed := 0
+	for i in w.chests:
+		if w.blocks[i] == Bx.CHEST:
+			placed += 1
+		for s in w.chests[i]:
+			if s != null:
+				filled += 1
+				break
+	all_ok = _check(placed == w.chests.size() and placed >= 15 and filled >= placed - 2, "loot chests placed=%d with_loot=%d" % [placed, filled]) and all_ok
 	print("STRUCTURE TEST ", "OK" if all_ok else "FAILED")
 	quit(0 if all_ok else 1)
 	return false

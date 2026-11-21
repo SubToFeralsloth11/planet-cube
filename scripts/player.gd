@@ -4,6 +4,11 @@ extends Node3D
 const EYE := 1.62
 const REACH := 5.0
 const SLOTS := 36
+const ARMOR0 := 36
+const OFFHAND := 40
+const INV_SIZE := 41
+const BLOCK_ARC := 100.0
+const UNBLOCKABLE := ["fall", "lava", "cactus", "magma"]
 const VMScript := preload("res://scripts/viewmodel.gd")
 const COYOTE := 0.12
 const JUMP_BUFFER := 0.15
@@ -39,7 +44,6 @@ var obtained := {}
 var stats := {"mined": 0, "placed": 0, "kills": 0, "deaths": 0, "time": 0.0}
 var spawn_pos := Vector3.ZERO
 var spawn_face := 2
-var fuel := 0
 var dead := false
 var target := {}
 var target_ent = null
@@ -74,13 +78,14 @@ var eat_tick := 0.0
 var was_in_water := false
 var hit_marker := 0.0
 var sprinting := false
+var blocking := false
 
 
 func setup(m, w) -> void:
 	main = m
 	world = w
 	body = VBody.new(world, 0.3, 1.8)
-	inv.resize(SLOTS)
+	inv.resize(INV_SIZE)
 	head = Node3D.new()
 	head.position = Vector3(0, EYE, 0)
 	add_child(head)
@@ -222,19 +227,26 @@ func add_item(id: int, n: int, notify := true) -> int:
 			var k := mini(mx, n)
 			inv[i] = {"id": id, "n": k}
 			n -= k
-	var first := not obtained.has(id)
-	if first:
-		obtained[id] = true
+	var first := note_obtained(id)
 	if notify and asked > n:
 		main.ui.pickup(id, asked - n, first)
 	main.on_inventory_changed()
 	return n
 
 
+## Records that the player has held `id` (missions check this). Returns true the first time.
+func note_obtained(id: int) -> bool:
+	if obtained.has(id):
+		return false
+	obtained[id] = true
+	return true
+
+
 func count(id: int) -> int:
 	var total := 0
 	var ids := B.group_members(id)
-	for s in inv:
+	for i in SLOTS:
+		var s = inv[i]
 		if s and s["id"] in ids:
 			total += s["n"]
 	return total
@@ -264,6 +276,88 @@ func consume_held(n := 1) -> void:
 		if s["n"] <= 0:
 			inv[sel] = null
 		main.on_inventory_changed()
+
+
+func offhand_id() -> int:
+	var s = inv[OFFHAND]
+	return s["id"] if s else 0
+
+
+## Total armor points worn (the HUD bar shows 20).
+func armor_points() -> int:
+	var total := 0
+	for k in 4:
+		var s = inv[ARMOR0 + k]
+		if s:
+			total += B.armor_points(s["id"])
+	return total
+
+
+## Damage multiplier from armor: 4% less per point, capped at 80%. Falls and lava ignore armor.
+func armor_factor(cause: String) -> float:
+	if cause == "fall" or cause == "lava":
+		return 1.0
+	return 1.0 - minf(0.8, armor_points() * 0.04)
+
+
+## Whether item `id` may go in inventory slot `i` (armor slots only take their matching piece).
+func slot_accepts(i: int, id: int) -> bool:
+	return i < ARMOR0 or i >= ARMOR0 + 4 or B.armor_slot(id) == i - ARMOR0
+
+
+func swap_offhand() -> void:
+	var tmp = inv[sel]
+	inv[sel] = inv[OFFHAND]
+	inv[OFFHAND] = tmp
+	eat_prog = 0.0
+	Sfx.play("tick", -8.0, 0.8)
+	main.on_inventory_changed()
+
+
+## Wears the held armor piece, swapping it with whatever was worn in that slot.
+func equip_held_armor() -> bool:
+	var k := B.armor_slot(held_id())
+	if k < 0:
+		return false
+	var tmp = inv[ARMOR0 + k]
+	inv[ARMOR0 + k] = inv[sel]
+	inv[sel] = tmp
+	Sfx.play("clang", -12.0, 1.4)
+	vm.swing()
+	main.on_inventory_changed()
+	return true
+
+
+func has_shield() -> bool:
+	return held_id() == B.SHIELD or offhand_id() == B.SHIELD
+
+
+## Items whose right-click does something themselves (so it doesn't raise an offhand shield).
+func _usable(id: int) -> bool:
+	return is_food(id) or B.is_block(id) or id == B.ROCKET or _is_bucket(id) or B.armor_slot(id) >= 0
+
+
+func _is_bucket(id: int) -> bool:
+	return id == B.BUCKET or id == B.WATER_BUCKET or id == B.LAVA_BUCKET
+
+
+func _wants_block(rmb: bool) -> bool:
+	return rmb and has_shield() and (held_id() == B.SHIELD or not _usable(held_id()))
+
+
+## True if a hit pushing the player along `knock` comes from within BLOCK_ARC degrees of the view.
+func blocks_hit(knock: Vector3, cause: String) -> bool:
+	if not blocking or knock == Vector3.ZERO or cause in UNBLOCKABLE:
+		return false
+	var u := body.up()
+	var from := -knock
+	var look := look_dir()
+	var ft := from - u * from.dot(u)
+	var lt := look - u * look.dot(u)
+	if ft.length() > 0.1 and lt.length() > 0.1:
+		from = ft
+		look = lt
+	return rad_to_deg(look.angle_to(from)) <= BLOCK_ARC
 
 
 # ---------------- frame / camera ----------------
@@ -313,14 +407,16 @@ func _unhandled_input(event: InputEvent) -> void:
 			select_slot((sel + 1) % 9)
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			place_cd = 0.0
-			_use()
+			_use(true)
 		elif event.button_index == MOUSE_BUTTON_LEFT and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-			if target_ent == null and not target and attack_cd <= 0.0:
+			if target_ent == null and not target and attack_cd <= 0.0 and not blocking:
 				vm.swing()
 				Sfx.play("swing", -16.0, randf_range(0.9, 1.15))
 	elif event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode >= KEY_1 and event.keycode <= KEY_9:
 			select_slot(event.keycode - KEY_1)
+		elif event.keycode == KEY_F:
+			swap_offhand()
 		elif event.physical_keycode == KEY_W or event.keycode == KEY_UP:
 			var t := Time.get_ticks_msec() / 1000.0
 			if t - last_fwd < 0.28:
@@ -388,7 +484,7 @@ func _movement(dt: float) -> void:
 		wish = wish.normalized()
 	if iz <= 0.1:
 		sprint_latched = false
-	var sprint := (Input.is_action_pressed("sprint") or sprint_latched) and iz > 0.1 and eat_prog <= 0.0
+	var sprint := (Input.is_action_pressed("sprint") or sprint_latched) and iz > 0.1 and eat_prog <= 0.0 and not blocking
 	sprinting = sprint and body.vel.length() > 4.0
 	var speed := 4.4
 	if sprint:
@@ -399,6 +495,8 @@ func _movement(dt: float) -> void:
 		speed *= 0.6
 	if eat_prog > 0.0:
 		speed *= 0.55
+	if blocking:
+		speed *= 0.4
 	var u := body.up()
 	var vu := body.vel.dot(u)
 	var hv := body.vel - u * vu
@@ -433,7 +531,9 @@ func _movement(dt: float) -> void:
 		vm.land_impact(ls)
 		if ls > 9.0:
 			main.spawn_particles(body.pos + u * 0.05, world.block_at(body.pos - u * 0.2), int(clampf(ls * 0.6, 4, 14)), u)
-	if body.on_ground and not body.flying and body.land_speed > 15.5 and not body.in_water:
+	# body.in_water is sampled before the move, so also check the cell we landed in: a bucket poured
+	# just before impact must save us even when we fall into it and hit the ground in the same step.
+	if body.on_ground and not body.flying and body.land_speed > 15.5 and not body.in_water and world.block_at(body.pos + u * 0.1) != B.WATER:
 		hurt((body.land_speed - 15.5) * 1.1 + 1.0, Vector3.ZERO, "fall")
 	if body.in_water and not was_in_water and absf(vu) > 3.0:
 		Sfx.play("splash", -4.0, randf_range(0.9, 1.1))
@@ -465,7 +565,7 @@ func _footstep(vol: float, pitch: float) -> void:
 func _interact(dt: float) -> void:
 	var eye := eye_pos()
 	var dir := look_dir()
-	var reach := REACH + (3.0 if creative else 0.0)
+	var reach := _reach()
 	target = world.raycast(eye, dir, reach)
 	var bd: float = target["dist"] if target else 999.0
 	target_ent = main.pick_entity(eye, dir, minf(reach, bd))
@@ -475,7 +575,9 @@ func _interact(dt: float) -> void:
 		sel_box.global_position = Vector3(p) + Vector3(0.5, 0.5, 0.5)
 	else:
 		sel_box.visible = false
-	var lmb := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+	var rmb := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+	blocking = _wants_block(rmb)
+	var lmb := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not blocking
 	if lmb and target_ent != null:
 		if attack_cd <= 0.0:
 			_attack(target_ent, dir)
@@ -491,11 +593,14 @@ func _interact(dt: float) -> void:
 	if crack.visible:
 		crack.global_position = Vector3(break_pos) + Vector3(0.5, 0.5, 0.5)
 		crack_mat.albedo_texture = T.cracks[clampi(int(break_prog * 10.0), 0, 9)]
-	var rmb := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
 	if _eat_update(dt, rmb):
 		return
-	if rmb and place_cd <= 0.0:
+	if rmb and not blocking and place_cd <= 0.0:
 		_use()
+
+
+func _reach() -> float:
+	return REACH + (3.0 if creative else 0.0)
 
 
 func is_food(id: int) -> bool:
@@ -615,7 +720,6 @@ func _mine(dt: float) -> void:
 func break_block(p: Vector3i, b: int) -> void:
 	var harvest := can_harvest(b) and not creative
 	world.set_block(p.x, p.y, p.z, B.AIR)
-	_fill_fluids(p)
 	stats["mined"] += 1
 	Sfx.dig(B.info[b]["sound"], -2.0)
 	main.spawn_particles(Vector3(p) + Vector3(0.5, 0.5, 0.5), b, 14, body.up())
@@ -639,31 +743,33 @@ func break_block(p: Vector3i, b: int) -> void:
 	var up_v: Vector3 = VBody.UPS[vf]
 	var above := p + Vector3i(up_v)
 	var ab: int = world.get_b(above.x, above.y, above.z)
-	if B.RENDER[ab] == B.R_CROSS or B.RENDER[ab] == B.R_TORCH:
+	# Plants on top break with their block; torches are handled by the world (they only drop when
+	# the block they actually hang on or stand on goes).
+	if B.RENDER[ab] == B.R_CROSS:
 		world.set_block(above.x, above.y, above.z, B.AIR)
-		if ab == B.TORCH or ab == B.FLOWER_RED or ab == B.FLOWER_YELLOW:
+		if ab == B.FLOWER_RED or ab == B.FLOWER_YELLOW:
 			main.pop_drop(ab, 1, Vector3(above) + Vector3(0.5, 0.5, 0.5), body.up())
+	if b == B.CHEST or b == B.FURNACE:
+		main.spill_storage(p, b)
 	main.on_block_broken(b)
+
+
+## Opens the chest or furnace screen for the block at `p`.
+func open_storage(p: Vector3i, b: int) -> void:
+	var idx := p.x + (p.y << 7) + (p.z << 14)
+	if b == B.CHEST:
+		main.ui.chest_idx = idx
+	else:
+		main.ui.furnace_idx = idx
+	main.open_inventory()
 
 
 func World_face(p: Vector3i) -> int:
 	return world.face_of_pos(Vector3(p) + Vector3(0.5, 0.5, 0.5))
 
 
-func _fill_fluids(p: Vector3i) -> void:
-	var f := World_face(p)
-	var down_v: Vector3i = -Vector3i(VBody.UPS[f])
-	for d in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0), Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
-		if d == down_v:
-			continue
-		var q: Vector3i = p + d
-		var nb: int = world.get_b(q.x, q.y, q.z)
-		if nb == B.WATER or nb == B.LAVA:
-			world.set_block(p.x, p.y, p.z, nb)
-			return
-
-
-func _use() -> void:
+## Right-click action. `click` = a fresh press (buckets act only on presses, never on hold-repeat).
+func _use(click := false) -> void:
 	if place_cd > 0.0:
 		return
 	place_cd = 0.22
@@ -675,13 +781,22 @@ func _use() -> void:
 		if health >= max_health and not creative:
 			main.ui.toast("You're not hungry - save it for later")
 		return
+	var tb: int = target["block"] if target else B.AIR
+	if (tb == B.CRAFTING_TABLE or tb == B.FURNACE or tb == B.CHEST) and not Input.is_action_pressed("sprint"):
+		if tb == B.CRAFTING_TABLE:
+			main.open_inventory()
+		else:
+			open_storage(target["pos"], tb)
+		return
+	if _is_bucket(id):
+		if click:
+			_use_bucket(id)
+		return
+	if equip_held_armor():
+		return
 	if not target:
 		return
-	var tb: int = target["block"]
 	var tp: Vector3i = target["pos"]
-	if (tb == B.CRAFTING_TABLE or tb == B.FURNACE) and not Input.is_action_pressed("sprint"):
-		main.open_inventory()
-		return
 	if tb == B.TNT:
 		world.set_block(tp.x, tp.y, tp.z, B.AIR)
 		main.spawn_tnt(Vector3(tp) + Vector3(0.5, 0.5, 0.5))
@@ -695,7 +810,7 @@ func _use() -> void:
 	var cur: int = world.get_b(np.x, np.y, np.z)
 	if not (cur == B.AIR or cur == B.WATER or cur == B.LAVA or B.RENDER[cur] == B.R_CROSS):
 		return
-	if not world.in_bounds(np.x, np.y, np.z) or np.x < 2 or np.y < 2 or np.z < 2 or np.x > 125 or np.y > 125 or np.z > 125:
+	if not _in_build_range(np):
 		return
 	if B.SOLID[id] == 1:
 		var bb := AABB(Vector3(np), Vector3.ONE).grow(-0.01)
@@ -703,6 +818,17 @@ func _use() -> void:
 			return
 		if main.entity_blocks(bb):
 			return
+	if id == B.TORCH:
+		var n: Vector3i = target["normal"]
+		var cell_up := Vector3i(VBody.UPS[World_face(np)])
+		var ni := np.x + (np.y << 7) + (np.z << 14)
+		if n == -cell_up:
+			main.ui.toast("Torches can't hang from ceilings")
+			return
+		if n == cell_up:
+			world.torch_wall.erase(ni)
+		else:
+			world.torch_wall[ni] = -n
 	world.set_block(np.x, np.y, np.z, id)
 	stats["placed"] += 1
 	consume_held()
@@ -711,6 +837,52 @@ func _use() -> void:
 	main.spawn_particles(center - Vector3(target["normal"]) * 0.45, id, 6, body.up())
 	Sfx.dig(B.info[id]["sound"], -4.0, 0.8)
 	main.on_block_placed(id)
+
+
+func _in_build_range(p: Vector3i) -> bool:
+	return p.x >= 2 and p.y >= 2 and p.z >= 2 and p.x <= 125 and p.y <= 125 and p.z <= 125
+
+
+## Empty bucket scoops the liquid source you look at; a full one pours a new source into the cell in
+## front of the targeted face (air, plants, flowing liquid or your own cell - so it can break a fall).
+func _use_bucket(id: int) -> void:
+	if id == B.BUCKET:
+		var hit: Dictionary = world.raycast(eye_pos(), look_dir(), _reach(), true)
+		if not hit or not (hit["block"] == B.WATER or hit["block"] == B.LAVA):
+			return
+		var hp: Vector3i = hit["pos"]
+		if not world.is_source(hp.x, hp.y, hp.z):
+			return
+		world.set_block(hp.x, hp.y, hp.z, B.AIR)
+		_fill_held_bucket(B.WATER_BUCKET if hit["block"] == B.WATER else B.LAVA_BUCKET)
+		Sfx.play("splash", -8.0, 1.25)
+		vm.swing()
+		return
+	if not target:
+		return
+	var np: Vector3i = target["pos"] + target["normal"]
+	var cur: int = world.get_b(np.x, np.y, np.z)
+	var flowing: bool = (cur == B.WATER or cur == B.LAVA) and not world.is_source(np.x, np.y, np.z)
+	if not _in_build_range(np) or not (cur == B.AIR or flowing or B.RENDER[cur] == B.R_CROSS):
+		return
+	world.set_block(np.x, np.y, np.z, B.WATER if id == B.WATER_BUCKET else B.LAVA)
+	if not creative:
+		inv[sel] = {"id": B.BUCKET, "n": 1}
+		main.on_inventory_changed()
+	Sfx.play("splash", -6.0, 0.9 if id == B.WATER_BUCKET else 0.6)
+	vm.swing()
+
+
+## Turns one held empty bucket into `filled`; with a stack of empties the full one goes to the inventory.
+func _fill_held_bucket(filled: int) -> void:
+	if not creative and inv[sel]["n"] == 1:
+		inv[sel] = {"id": filled, "n": 1}
+		main.on_inventory_changed()
+		return
+	consume_held()
+	var left := add_item(filled, 1, false)
+	if left > 0:
+		main.spawn_drop(filled, left, eye_pos(), look_dir() * 2.0, 0.6)
 
 
 func _survival(dt: float) -> void:
@@ -743,6 +915,13 @@ func _survival(dt: float) -> void:
 func hurt(amount: float, knock: Vector3, cause := "") -> void:
 	if creative or dead or amount <= 0.0:
 		return
+	if blocks_hit(knock, cause):
+		Sfx.play("clang", -3.0, randf_range(0.9, 1.1))
+		shake = maxf(shake, 0.3)
+		body.vel += knock * 0.25
+		vm.on_block()
+		return
+	amount *= armor_factor(cause)
 	health -= amount
 	since_hurt = 0.0
 	regen_t = 0.0
@@ -807,12 +986,16 @@ func _visuals(dt: float) -> void:
 	if id != held_shown:
 		held_shown = id
 		VMScript.dress(model_item, id, world, 2.2)
-	var lit: float = B.LIGHT[id] if B.is_block(id) else (0.5 if id == B.STARCORE else 0.0)
+	var off := offhand_id()
+	# Light comes from whichever hand holds the brighter item (torch, lamp, starcore).
+	var src := id if _light_of(id) >= _light_of(off) else off
+	var lit := _light_of(src)
 	held_light.visible = lit > 0.0
 	if held_light.visible:
+		held_light.position.x = 0.3 if src == id else -0.3
 		held_light.light_energy = 2.0 * (1.0 + sin(Time.get_ticks_msec() * 0.023) * 0.05 + sin(Time.get_ticks_msec() * 0.037) * 0.04)
-		held_light.light_color = Color(0.95, 0.5, 1.0) if id == B.STARCORE else Color(1.0, 0.72, 0.42)
-	vm.update(dt, id, hs, body.on_ground, sprinting, eat_prog > 0.0, walk_phase)
+		held_light.light_color = Color(0.95, 0.5, 1.0) if src == B.STARCORE else Color(1.0, 0.72, 0.42)
+	vm.update(dt, id, off, blocking, hs, body.on_ground, sprinting, eat_prog > 0.0, walk_phase)
 	var third := view_mode == 1
 	model.visible = third
 	var want := 0.0
@@ -828,8 +1011,12 @@ func _visuals(dt: float) -> void:
 	if legs.size() == 2:
 		legs[0].rotation.x = sw_leg
 		legs[1].rotation.x = -sw_leg
-		arms[0].rotation.x = -sw_leg * 0.8
+		arms[0].rotation.x = -sw_leg * 0.8 - (1.2 if blocking else 0.0)
 		arms[1].rotation.x = sw_leg * 0.8 - swing_arc * 1.4 - (0.9 if eat_prog > 0.0 else 0.0)
+
+
+func _light_of(id: int) -> float:
+	return B.LIGHT[id] if B.is_block(id) else (0.5 if id == B.STARCORE else 0.0)
 
 
 func _process(_dt: float) -> void:
@@ -845,7 +1032,7 @@ func to_dict() -> Dictionary:
 	return {
 		"pos": body.pos, "face": body.face, "frame": [fr.x, fr.y, fr.z], "yaw": yaw, "pitch": pitch,
 		"inv": inv, "sel": sel, "health": health, "creative": creative, "stats": stats,
-		"obtained": obtained, "spawn": spawn_pos, "spawn_face": spawn_face, "fuel": fuel,
+		"obtained": obtained, "spawn": spawn_pos, "spawn_face": spawn_face,
 	}
 
 
@@ -857,7 +1044,7 @@ func from_dict(d: Dictionary) -> void:
 	yaw = d["yaw"]
 	pitch = d["pitch"]
 	inv = d["inv"]
-	inv.resize(SLOTS)
+	inv.resize(INV_SIZE)
 	sel = d["sel"]
 	health = d["health"]
 	creative = d["creative"]
@@ -865,6 +1052,5 @@ func from_dict(d: Dictionary) -> void:
 	obtained = d["obtained"]
 	spawn_pos = d["spawn"]
 	spawn_face = d["spawn_face"]
-	fuel = d.get("fuel", 0)
 	vis_q = body.frame.get_rotation_quaternion()
 	_sync_transform()

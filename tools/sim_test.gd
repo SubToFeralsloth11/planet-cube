@@ -9,7 +9,6 @@ var Bx
 
 
 func _initialize() -> void:
-	DirAccess.remove_absolute(ProjectSettings.globalize_path("user://planet_cube.save"))
 	main = load("res://main.tscn").instantiate()
 	root.add_child(main)
 	t0 = Time.get_ticks_msec()

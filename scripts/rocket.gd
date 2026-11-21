@@ -8,6 +8,7 @@ var state := "idle"
 var flames: CPUParticles3D
 var smoke: CPUParticles3D
 var beacon: OmniLight3D
+var pad_parts: Array[MeshInstance3D] = []
 var speed := 0.0
 var t := 0.0
 var dead := false
@@ -52,11 +53,11 @@ func _build() -> void:
 	var dark := _mat(Color(0.2, 0.2, 0.23), 0.0, 0.7)
 	var pad := BoxMesh.new()
 	pad.size = Vector3(3.4, 0.25, 3.4)
-	_add(pad, _mat(Color(0.35, 0.36, 0.4), 0.0, 0.5), Vector3(0, 0.125, 0))
+	pad_parts.append(_add(pad, _mat(Color(0.35, 0.36, 0.4), 0.0, 0.5), Vector3(0, 0.125, 0)))
 	for k in 4:
 		var stripe := BoxMesh.new()
 		stripe.size = Vector3(3.42, 0.08, 0.3)
-		_add(stripe, _mat(Color(1.0, 0.8, 0.1)), Vector3(0, 0.22, 0), Vector3(0, k * PI / 4.0, 0))
+		pad_parts.append(_add(stripe, _mat(Color(1.0, 0.8, 0.1)), Vector3(0, 0.22, 0), Vector3(0, k * PI / 4.0, 0)))
 	var noz := CylinderMesh.new()
 	noz.top_radius = 0.42
 	noz.bottom_radius = 0.68
@@ -167,6 +168,9 @@ func ignite() -> void:
 	state = "launching"
 	flames.emitting = true
 	smoke.emitting = true
+	# The pad stays on the ground: detach it from the rocket's transform where it stands.
+	for p in pad_parts:
+		p.top_level = true
 
 
 func world_aabb() -> AABB:

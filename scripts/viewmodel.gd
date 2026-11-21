@@ -4,11 +4,13 @@ extends Node3D
 ## renders it at a fixed FOV so it doesn't stretch while sprinting - with no extra render pass.
 ## Items are extruded from their pixel art into 3D voxels.
 ## Animations: equip, swing, mining loop, eating, walk bob, idle breathing, mouse sway, sprint, landing.
+## The offhand item sits in a mirrored left arm; a shield is raised toward screen centre while guarding.
 
 const FOV := 66.0
 const SUIT := Color(0.95, 0.55, 0.15)
 const GLOVE := Color(0.7, 0.72, 0.77)
 const REST := Vector3(0.36, -0.34, -0.58)
+const OFF_REST := Vector3(-0.38, -0.37, -0.56)
 
 ## Clip-space override: rescales x/y to the hand FOV and squeezes depth into the 2% nearest the camera
 ## (Godot uses reversed Z, so 1.0 is the near plane).
@@ -50,6 +52,8 @@ var player
 var rig: Node3D
 var grip: Node3D
 var item: MeshInstance3D
+var off_rig: Node3D
+var off_item: MeshInstance3D
 
 var shown_id := -2
 var pending_id := -2
@@ -64,13 +68,21 @@ var land_vel := 0.0
 var sprint := 0.0
 var hurt := 0.0
 var t := 0.0
+var off_shown := -2
+var off_equip := 1.0
+var guard := 0.0
+var jolt := 0.0
 
 
 func setup(p) -> void:
 	player = p
 	rig = Node3D.new()
 	add_child(rig)
-	_build_arm()
+	item = _build_arm(rig, 1.0)
+	off_rig = Node3D.new()
+	off_rig.visible = false
+	add_child(off_rig)
+	off_item = _build_arm(off_rig, -1.0)
 
 
 static func _shader(key: String, code: String) -> Shader:
@@ -94,7 +106,7 @@ func _fabric(base: Color, seed_v: int) -> ImageTexture:
 	return ImageTexture.create_from_image(im)
 
 
-func _part(size: Vector3, pos: Vector3, col: Color, seed_v: int) -> MeshInstance3D:
+func _part(parent: Node3D, size: Vector3, pos: Vector3, col: Color, seed_v: int) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = size
@@ -106,7 +118,7 @@ func _part(size: Vector3, pos: Vector3, col: Color, seed_v: int) -> MeshInstance
 	mi.material_override = m
 	_vm_instance(mi)
 	mi.position = pos
-	rig.add_child(mi)
+	parent.add_child(mi)
 	return mi
 
 
@@ -115,19 +127,22 @@ static func _vm_instance(mi: MeshInstance3D) -> void:
 	mi.extra_cull_margin = 2.0
 
 
-func _build_arm() -> void:
-	# The rig origin is the fist; the sleeve runs back toward the bottom-right corner of the screen.
-	_part(Vector3(0.13, 0.13, 0.5), Vector3(0, -0.005, 0.3), SUIT, 1)
-	_part(Vector3(0.145, 0.145, 0.05), Vector3(0, -0.005, 0.1), GLOVE.darkened(0.08), 2)
-	_part(Vector3(0.135, 0.135, 0.13), Vector3(0, 0, 0.0), GLOVE, 3)
-	_part(Vector3(0.05, 0.04, 0.09), Vector3(-0.07, 0.03, -0.015), GLOVE.darkened(0.05), 4)
-	grip = Node3D.new()
-	grip.position = Vector3(0.0, 0.03, -0.03)
-	rig.add_child(grip)
-	item = MeshInstance3D.new()
-	_vm_instance(item)
-	grip.add_child(item)
-
+## Builds an arm into `parent` (side 1 = right, -1 = mirrored left) and returns its item mesh.
+func _build_arm(parent: Node3D, side: float) -> MeshInstance3D:
+	# The rig origin is the fist; the sleeve runs back toward the bottom corner of the screen.
+	_part(parent, Vector3(0.13, 0.13, 0.5), Vector3(0, -0.005, 0.3), SUIT, 1)
+	_part(parent, Vector3(0.145, 0.145, 0.05), Vector3(0, -0.005, 0.1), GLOVE.darkened(0.08), 2)
+	_part(parent, Vector3(0.135, 0.135, 0.13), Vector3(0, 0, 0.0), GLOVE, 3)
+	_part(parent, Vector3(0.05, 0.04, 0.09), Vector3(-0.07 * side, 0.03, -0.015), GLOVE.darkened(0.05), 4)
+	var g := Node3D.new()
+	g.position = Vector3(0.0, 0.03, -0.03)
+	parent.add_child(g)
+	if side > 0.0:
+		grip = g
+	var mi := MeshInstance3D.new()
+	_vm_instance(mi)
+	g.add_child(mi)
+	return mi
 
 # ---------------- item meshes ----------------
 
@@ -243,6 +258,11 @@ static func dress(mi: MeshInstance3D, id: int, world, scale_k := 1.0, vm := fals
 		if vm:
 			mi.material_override = block_material(world)
 		return
+	elif id == B.SHIELD:
+		# Held by the strap behind its centre, face toward the camera.
+		var sz := 0.42 * scale_k
+		mi.mesh = voxel_mesh(id, sz)
+		mi.position = Vector3(0, sz * 0.12, -0.08 * scale_k)
 	elif is_tool(id):
 		var sz := 0.36 * scale_k
 		mi.mesh = voxel_mesh(id, sz)
@@ -277,13 +297,18 @@ func on_hurt() -> void:
 	hurt = 1.0
 
 
+## A hit landed on the raised shield: knock it back toward the camera.
+func on_block() -> void:
+	jolt = 1.0
+
+
 func add_look(rel: Vector2) -> void:
 	look_acc += rel
 
 
 # ---------------- per frame ----------------
 
-func update(dt: float, id: int, moving: float, on_ground: bool, sprinting: bool, eating: bool, phase: float) -> void:
+func update(dt: float, id: int, off_id: int, guarding: bool, moving: float, on_ground: bool, sprinting: bool, eating: bool, phase: float) -> void:
 	t += dt
 	if id != pending_id:
 		pending_id = id
@@ -305,6 +330,17 @@ func update(dt: float, id: int, moving: float, on_ground: bool, sprinting: bool,
 	eat = move_toward(eat, 1.0 if eating else 0.0, dt * 5.0)
 	sprint = lerpf(sprint, 1.0 if sprinting else 0.0, 1.0 - exp(-5.0 * dt))
 	hurt = maxf(0.0, hurt - dt * 3.0)
+	jolt = maxf(0.0, jolt - dt * 5.0)
+	guard = move_toward(guard, 1.0 if guarding else 0.0, dt * 7.0)
+	if off_id != off_shown:
+		off_shown = off_id
+		dress(off_item, off_id, player.world, 1.0, true)
+		off_equip = 1.0
+	off_equip = move_toward(off_equip, 0.0, dt * 3.5)
+	off_rig.visible = off_shown > 0
+	# The main hand raises a shield it holds itself; otherwise an offhand shield comes up.
+	var main_guard := guard if shown_id == B.SHIELD else 0.0
+	var off_guard := guard if (shown_id != B.SHIELD and off_shown == B.SHIELD) else 0.0
 	# Mouse sway: the arm trails slightly behind the look speed, eased so it never snaps.
 	var look_speed := look_acc / maxf(dt, 0.001)
 	look_acc = Vector2.ZERO
@@ -356,6 +392,9 @@ func update(dt: float, id: int, moving: float, on_ground: bool, sprinting: bool,
 	# eating: bring it to the mouth and chew
 	pos = pos.lerp(Vector3(0.12, -0.19 + absf(sin(t * 9.0)) * 0.012, -0.36), eat)
 	rot = rot.lerp(Vector3(0.2, 0.45, -0.1), eat)
+	# guard: bring the shield up in front, just right of centre
+	pos = pos.lerp(Vector3(0.15, -0.17, -0.42), main_guard) + Vector3(0, 0, jolt * 0.06 * main_guard)
+	rot = rot.lerp(Vector3(0.0, deg_to_rad(-8), 0.0), main_guard)
 	# equip / hurt
 	pos.y -= 0.42 * e
 	rot.x -= 0.3 * e
@@ -368,3 +407,28 @@ func update(dt: float, id: int, moving: float, on_ground: bool, sprinting: bool,
 	var b := Basis.from_euler(rot)
 	rig.basis = b
 	rig.position = pos + rest_basis * shoulder - b * shoulder
+	if off_rig.visible:
+		_pose_offhand(amt, phase, off_guard)
+
+
+## Mirrored left arm: same bob, sway, sprint and landing as the right, plus the shield guard.
+func _pose_offhand(amt: float, phase: float, g: float) -> void:
+	var pos := OFF_REST
+	var rest := Vector3(deg_to_rad(10), deg_to_rad(-20), deg_to_rad(-2))
+	var rot := rest
+	pos += Vector3(-sin(phase) * 0.008 * amt, -absf(cos(phase)) * 0.011 * amt + sin(t * 1.7 + 1.0) * 0.003, 0)
+	rot.z -= sin(phase) * 0.015 * amt
+	rot.y += sway.x * 0.8
+	rot.x += sway.y * 0.6
+	pos += Vector3(-sway.x * 0.15, sway.y * 0.12, 0)
+	pos += Vector3(-0.03, -0.05, 0.03) * sprint
+	rot += Vector3(-0.15, -0.2, -0.08) * sprint
+	pos.y += land * 0.25
+	pos = pos.lerp(Vector3(-0.15, -0.17, -0.42), g) + Vector3(0, 0, jolt * 0.06 * g)
+	rot = rot.lerp(Vector3(0.0, deg_to_rad(8), 0.0), g)
+	pos += Vector3(-0.1, -0.12, 0.0) * eat
+	pos.y -= 0.42 * ease(off_equip, 0.6) + hurt * 0.04
+	var shoulder := Vector3(0, 0, 0.55)
+	var b := Basis.from_euler(rot)
+	off_rig.basis = b
+	off_rig.position = pos + Basis.from_euler(rest) * shoulder - b * shoulder

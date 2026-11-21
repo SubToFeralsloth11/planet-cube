@@ -1,6 +1,17 @@
 extends Node
 ## Procedural pixel-art textures, block texture array and UI icons (autoload "T").
 
+## 16-wide armor silhouettes (helmet, chestplate, leggings, boots), vertically centred when drawn.
+const ARMOR_SHAPES := [
+	["....########....", "...##########...", "..############..", "..############..",
+		"..###......###..", "..###......###..", "..##........##.."],
+	["..###......###..", ".#####....#####.", ".##############.", ".##############.", "..############..",
+		"...##########...", "...##########...", "...##########...", "...##########...", "...####..####..."],
+	["...##########...", "...##########...", "...##########...", "...####..####...", "...####..####...",
+		"...####..####...", "...###....###...", "...###....###...", "...###....###...", "...###....###..."],
+	["....###...###...", "....###...###...", "....###...###...", "..#####.#####...", "..#####.#####..."],
+]
+
 var images := {}
 var array_tex: Texture2DArray
 var icons := {}
@@ -8,6 +19,9 @@ var cracks: Array[ImageTexture] = []
 var heart_full: ImageTexture
 var heart_half: ImageTexture
 var heart_empty: ImageTexture
+var armor_full: ImageTexture
+var armor_half: ImageTexture
+var armor_empty: ImageTexture
 var block_color := {}
 var _rng := RandomNumberGenerator.new()
 
@@ -29,6 +43,7 @@ func _ready() -> void:
 	for s in 10:
 		cracks.append(ImageTexture.create_from_image(_crack(s)))
 	_make_hearts()
+	_make_armor_icons()
 
 
 func _avg(im: Image) -> Color:
@@ -436,6 +451,28 @@ func _paint(n: String) -> Image:
 			for p in [Vector2i(10, 2), Vector2i(12, 2), Vector2i(10, 3), Vector2i(12, 3), Vector2i(11, 1)]:
 				im.set_pixel(p.x, p.y, Color(0.6, 0.6, 0.64))
 			return im
+		"chest_top":
+			var im := _planks(Color(0.66, 0.47, 0.25))
+			for i in 16:
+				for j in [0, 15]:
+					im.set_pixel(i, j, Color(0.33, 0.21, 0.1))
+					im.set_pixel(j, i, Color(0.33, 0.21, 0.1))
+			return im
+		"chest_front":
+			var im := _planks(Color(0.66, 0.47, 0.25))
+			var rim := Color(0.33, 0.21, 0.1)
+			for i in 16:
+				for j in [0, 15]:
+					im.set_pixel(i, j, rim)
+					im.set_pixel(j, i, rim)
+				im.set_pixel(i, 5, Color(0.2, 0.12, 0.06))
+				im.set_pixel(i, 6, rim)
+			for y in range(3, 9):
+				for x in range(7, 9):
+					im.set_pixel(x, y, Color(0.78, 0.78, 0.82) if y < 6 else Color(0.55, 0.55, 0.6))
+			im.set_pixel(6, 4, Color(0.45, 0.45, 0.5))
+			im.set_pixel(9, 4, Color(0.45, 0.45, 0.5))
+			return im
 		"furnace_top":
 			var im := _noise(Color(0.48, 0.48, 0.5), 0.04)
 			for i in 16:
@@ -580,6 +617,28 @@ func _make_hearts() -> void:
 	heart_empty = ImageTexture.create_from_image(_scale(empty, 3))
 
 
+## HUD armor points: a small chestplate per 2 points (full / half / empty), like the hearts.
+func _make_armor_icons() -> void:
+	var shape := [".##...##.", "####.####", "#########", ".#######.", ".#######.", ".#######.", ".###.###."]
+	var ims: Array[Image] = []
+	for k in 3:
+		var im := Image.create(9, 7, false, Image.FORMAT_RGBA8)
+		for y in 7:
+			for x in 9:
+				if shape[y][x] != "#":
+					continue
+				var edge: bool = x == 0 or x == 8 or y == 6 or shape[y][x - 1] != "#" or shape[y][x + 1] != "#" or (y > 0 and shape[y - 1][x] != "#") or (y < 6 and shape[y + 1][x] != "#")
+				var filled := k == 0 or (k == 1 and x < 4)
+				var c := Color(0.86, 0.87, 0.92) if filled else Color(0.2, 0.21, 0.25)
+				if filled and y == 2 and x in [2, 3]:
+					c = Color(1, 1, 1)
+				im.set_pixel(x, y, Color(0.08, 0.08, 0.1) if edge else c)
+		ims.append(_scale(im, 3))
+	armor_full = ImageTexture.create_from_image(ims[0])
+	armor_half = ImageTexture.create_from_image(ims[1])
+	armor_empty = ImageTexture.create_from_image(ims[2])
+
+
 func _scale(im: Image, s: int) -> Image:
 	var o := im.duplicate()
 	o.resize(im.get_width() * s, im.get_height() * s, Image.INTERPOLATE_NEAREST)
@@ -672,6 +731,22 @@ func _blob(im: Image, cr: float, cc: float, rr: float, rc: float, col: Color, sh
 					elif dx + dy > 0.7:
 						c = col.darkened(0.3)
 				im.set_pixel(x, y, c)
+
+
+## Draws '#' rows centred vertically, lit along top edges and shaded along bottom edges.
+func _pattern(im: Image, rows: Array, col: Color) -> void:
+	var y0 := (16 - rows.size()) / 2
+	for r in rows.size():
+		var row: String = rows[r]
+		for x in 16:
+			if row[x] != "#":
+				continue
+			var c := col
+			if r == 0 or rows[r - 1][x] != "#" or x == 0 or row[x - 1] != "#":
+				c = col.lightened(0.3)
+			elif r == rows.size() - 1 or rows[r + 1][x] != "#" or x == 15 or row[x + 1] != "#":
+				c = col.darkened(0.3)
+			im.set_pixel(x, y0 + r, c)
 
 
 func _outline(im: Image) -> void:
@@ -802,6 +877,46 @@ func _item_img(id: int, outline := true) -> Image:
 			for x in range(6, 10):
 				im.set_pixel(x, 13, Color(1, 0.7, 0.2))
 				im.set_pixel(x, 14, Color(1, 0.4, 0.1) if x % 2 == 0 else Color(0, 0, 0, 0))
+		B.BUCKET, B.WATER_BUCKET, B.LAVA_BUCKET:
+			var iron := Color(0.78, 0.79, 0.83)
+			for y in range(4, 15):
+				var w := 5.5 - (y - 4) * 0.2
+				for x in range(roundi(8.0 - w), roundi(8.0 + w)):
+					var c := iron
+					if x <= roundi(8.0 - w) + 1:
+						c = iron.lightened(0.25)
+					elif x >= roundi(8.0 + w) - 2:
+						c = iron.darkened(0.3)
+					im.set_pixel(x, y, c)
+			for x in range(3, 13):
+				im.set_pixel(x, 4, iron.lightened(0.35))
+			var inner := Color(0.22, 0.22, 0.26)
+			if id == B.WATER_BUCKET:
+				inner = Color(0.2, 0.42, 0.95)
+			elif id == B.LAVA_BUCKET:
+				inner = Color(1.0, 0.5, 0.1)
+			for x in range(4, 12):
+				im.set_pixel(x, 5, inner.lightened(0.15) if x < 7 else inner)
+				im.set_pixel(x, 6, inner.darkened(0.2))
+			_line(im, 4, 3, 1, 6, iron.darkened(0.45), 0.5)
+			_line(im, 1, 6, 1, 9, iron.darkened(0.45), 0.5)
+			_line(im, 1, 9, 4, 12, iron.darkened(0.45), 0.5)
+		B.SHIELD:
+			var wood := Color(0.62, 0.44, 0.24)
+			var rim := Color(0.62, 0.63, 0.68)
+			for y in range(1, 15):
+				var inset := maxi(0, y - 10)
+				for x in range(3 + inset, 13 - inset):
+					var edge := y == 1 or y == 14 or x == 3 + inset or x == 12 - inset
+					var c := wood if x % 3 != 0 else wood.darkened(0.25)
+					im.set_pixel(x, y, rim if edge else c)
+			for p in [Vector2i(7, 6), Vector2i(8, 6), Vector2i(7, 7), Vector2i(8, 7)]:
+				im.set_pixel(p.x, p.y, rim.lightened(0.3))
+			for p in [Vector2i(6, 6), Vector2i(9, 7), Vector2i(7, 8), Vector2i(8, 5)]:
+				im.set_pixel(p.x, p.y, rim.darkened(0.2))
+		_ when B.armor_slot(id) >= 0:
+			var col: Color = B.MAT_COLORS[2] if id < B.DIAMOND_HELMET else B.MAT_COLORS[3]
+			_pattern(im, ARMOR_SHAPES[B.armor_slot(id)], col)
 	if outline:
 		_outline(im)
 	return im

@@ -1,7 +1,8 @@
 extends Node3D
 ## Game orchestration: states, day/night, spawning, missions, crafting, boss fight, saving.
 
-const SAVE_PATH := "user://planet_cube.save"
+## Pre-worlds single save; migrated into the worlds folder on first launch.
+const OLD_SAVE_PATH := "user://planet_cube.save"
 const DAY_LEN := 540.0
 const WorldScript := preload("res://scripts/world.gd")
 const PlayerScript := preload("res://scripts/player.gd")
@@ -41,6 +42,11 @@ var cine_t := 0.0
 var danger := 0.0
 var map_view := false
 var world_fresh := true
+var worlds_dir := "user://worlds/"
+## The world file being played (empty on the title screen before one is chosen).
+var save_path := ""
+## Which world file the terrain currently in memory belongs to.
+var terrain_of := ""
 var clouds: Array = []
 var cloud_mat: StandardMaterial3D
 var part_mesh: BoxMesh
@@ -58,6 +64,8 @@ func _ready() -> void:
 	world = WorldScript.new()
 	add_child(world)
 	world.tnt_lit.connect(func(p): spawn_tnt(p, 0.6 + randf() * 0.5))
+	world.torch_popped.connect(func(p): pop_drop(B.TORCH, 1, p, VBody.UPS[world.face_of_pos(p)]))
+	world.liquid_fused.connect(func(p): Sfx.play3d("fuse", p, -6.0, 1.6); spawn_burst(p, Color(0.55, 0.55, 0.55), 10, 0.6))
 	player = PlayerScript.new()
 	add_child(player)
 	player.setup(self, world)
@@ -195,7 +203,7 @@ func _define_objectives() -> void:
 		["Craft a Stone Pickaxe", "Stone tools dig much faster.", func(): return _has_any([B.STONE_PICK, B.IRON_PICK, B.DIAMOND_PICK])],
 		["Find coal and craft torches", "Coal ore is speckled black. Torches light caves and keep monsters away.", func(): return _has_any([B.TORCH])],
 		["Build a Furnace", "8 cobblestone at a crafting table.", func(): return _has_any([B.FURNACE])],
-		["Smelt iron", "Iron ore has peach specks (needs a stone pickaxe). Smelt it next to a furnace.", func(): return _has_any([B.IRON_INGOT])],
+		["Smelt iron", "Iron ore has peach specks (needs a stone pickaxe). Right-click a furnace: ore on top, fuel (coal or wood) below.", func(): return _has_any([B.IRON_INGOT])],
 		["Craft an Iron Pickaxe", "Iron can mine gold and diamonds.", func(): return _has_any([B.IRON_PICK, B.DIAMOND_PICK])],
 		["Dig deep for diamonds", "Diamonds hide deep inside the planet - and under the Ashlands.", func(): return _has_any([B.DIAMOND])],
 		["Craft a Diamond Pickaxe", "Only diamond can crack the glowing Core Rock.", func(): return _has_any([B.DIAMOND_PICK])],
@@ -221,15 +229,38 @@ func _progress(f: float, text: String) -> void:
 
 func _boot() -> void:
 	ui.show_screen("loading")
-	var data := _read_save()
+	_setup_worlds_dir()
+	var data := {}
+	var worlds := list_worlds()
+	if not worlds.is_empty():
+		save_path = worlds[0]["path"]
+		data = _read_save()
 	if data.is_empty():
 		await _load_world(randi() % 1000000, {})
+		terrain_of = ""
 	else:
-		await _load_world(data["seed"], data["edits"])
+		await _load_world(data["seed"], data["edits"], data.get("flow", {}))
+		terrain_of = save_path
 	_enter_title()
 
 
-func _load_world(seed_val: int, edits: Dictionary) -> void:
+## Worlds live in their own folder. Headless/test runs (a SceneTree script is the main loop) use a
+## separate, wiped folder so they never touch the player's worlds. An old single save is migrated.
+func _setup_worlds_dir() -> void:
+	if Engine.get_main_loop().get_script() != null:
+		worlds_dir = "user://test_worlds/"
+		DirAccess.make_dir_recursive_absolute(worlds_dir)
+		for fn in DirAccess.get_files_at(worlds_dir):
+			DirAccess.remove_absolute(worlds_dir + fn)
+		return
+	DirAccess.make_dir_recursive_absolute(worlds_dir)
+	if FileAccess.file_exists(OLD_SAVE_PATH):
+		var p := worlds_dir + "world_%d.save" % Time.get_unix_time_from_system()
+		DirAccess.rename_absolute(OLD_SAVE_PATH, p)
+		_write_meta(p, {"name": "My World", "mode": "survival", "created": Time.get_unix_time_from_system(), "played": Time.get_unix_time_from_system(), "time": 0.0})
+
+
+func _load_world(seed_val: int, edits: Dictionary, flow := {}) -> void:
 	state = "loading"
 	ui.show_screen("loading")
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -237,8 +268,9 @@ func _load_world(seed_val: int, edits: Dictionary) -> void:
 	await world.generate(seed_val, _progress)
 	world.edits = edits.duplicate()
 	world.apply_edits()
+	world.load_flow(flow)
 	await world.finish_build(_progress)
-	world_fresh = edits.is_empty()
+	world_fresh = edits.is_empty() and flow.is_empty()
 
 
 func _enter_title() -> void:
@@ -249,65 +281,146 @@ func _enter_title() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
+# ---------------- worlds ----------------
+
 func has_save() -> bool:
-	return FileAccess.file_exists(SAVE_PATH)
+	return not list_worlds().is_empty()
+
+
+func _meta_path(save: String) -> String:
+	return save.get_basename() + ".meta"
+
+
+func _write_meta(save: String, meta: Dictionary) -> void:
+	var f := FileAccess.open(_meta_path(save), FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(meta))
+
+
+## Saved worlds, most recently played first: [{path, name, mode, created, played, time}].
+func list_worlds() -> Array:
+	var out := []
+	for fn in DirAccess.get_files_at(worlds_dir):
+		if fn.get_extension() != "save":
+			continue
+		var p := worlds_dir + fn
+		var meta := {"name": fn.get_basename(), "mode": "survival", "created": 0, "played": 0, "time": 0.0}
+		if FileAccess.file_exists(_meta_path(p)):
+			var parsed = JSON.parse_string(FileAccess.get_file_as_string(_meta_path(p)))
+			if parsed is Dictionary:
+				meta.merge(parsed, true)
+		meta["path"] = p
+		out.append(meta)
+	out.sort_custom(func(a, b): return a["played"] > b["played"])
+	return out
+
+
+func delete_world(path: String) -> void:
+	DirAccess.remove_absolute(path)
+	DirAccess.remove_absolute(_meta_path(path))
+	if path == save_path:
+		save_path = ""
+
+
+## Creates a new world file and starts playing it. A numeric or text seed reproduces a planet.
+func create_world(world_name: String, mode: String, seed_text := "") -> void:
+	var seed_val := randi() % 1000000
+	var st := seed_text.strip_edges()
+	if st != "":
+		seed_val = int(st) if st.is_valid_int() else absi(st.hash()) % 1000000
+	var nm := world_name.strip_edges()
+	if nm == "":
+		nm = "World %d" % (list_worlds().size() + 1)
+	save_path = worlds_dir + "world_%d_%d.save" % [Time.get_unix_time_from_system(), randi() % 1000]
+	var now := Time.get_unix_time_from_system()
+	_write_meta(save_path, {"name": nm, "mode": mode, "created": now, "played": now, "time": 0.0, "seed": seed_val})
+	await _load_world(seed_val, {})
+	terrain_of = save_path
+	_new_game(mode)
+
+
+func play_world(path: String) -> void:
+	save_path = path
+	var data := _read_save()
+	if data.is_empty():
+		return
+	# The title screen already shows the most recent world; only regenerate for a different one.
+	if terrain_of != path:
+		await _load_world(data["seed"], data["edits"], data.get("flow", {}))
+		terrain_of = path
+	_restore_game(data)
 
 
 func _read_save() -> Dictionary:
-	if not has_save():
+	if save_path == "" or not FileAccess.file_exists(save_path):
 		return {}
-	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	var f := FileAccess.open(save_path, FileAccess.READ)
 	if f == null:
 		return {}
 	var d = f.get_var()
 	return d if d is Dictionary else {}
 
 
+## Title-screen entry points: "continue" plays the most recent world; "survival"/"creative" make a new one.
 func start_game(mode: String) -> void:
 	if mode == "continue":
-		var data := _read_save()
-		if data.is_empty():
+		var worlds := list_worlds()
+		if worlds.is_empty():
 			return
-		if data["seed"] != world.world_seed:
-			await _load_world(data["seed"], data["edits"])
-		player.from_dict(data["player"])
-		time_of_day = data.get("time", 0.9)
-		objective = data.get("objective", 0)
-		boss_defeated = data.get("boss_defeated", false)
-		escaped = data.get("escaped", false)
-		var rd = data.get("rocket", null)
-		if rd:
-			_spawn_rocket(rd["face"], rd["pos"])
-			if boss_defeated:
-				rocket.state = "ready"
-		for dd in data.get("drops", []):
-			spawn_drop(dd[0], dd[1], dd[2], Vector3.ZERO, 0.0)
+		await play_world(worlds[0]["path"])
 	else:
-		if not world_fresh or has_save():
-			await _load_world(randi() % 1000000, {})
-		player.inv.clear()
-		player.inv.resize(player.SLOTS)
-		player.obtained = {}
-		player.stats = {"mined": 0, "placed": 0, "kills": 0, "deaths": 0, "time": 0.0}
-		player.creative = mode == "creative"
-		player.health = player.max_health
-		player.fuel = 0
-		player.yaw = 0.0
-		player.pitch = -0.1
-		player.body.flying = false
-		var sp: Vector3 = world.find_spawn()
-		player.spawn_pos = sp
-		player.spawn_face = 2
-		player.spawn_at(sp, 2)
-		time_of_day = 0.92
-		objective = 0
-		boss_defeated = false
-		escaped = false
-		if player.creative:
-			for id in [B.GRASS, B.STONE_BRICKS, B.PLANKS, B.GLASS, B.TORCH, B.LAMP, B.TNT, B.DIAMOND_SWORD, B.DIAMOND_PICK]:
-				player.add_item(id, B.stack_max(id), false)
-		world_fresh = false
-		save_game()
+		await create_world("", mode)
+
+
+func _restore_game(data: Dictionary) -> void:
+	player.from_dict(data["player"])
+	time_of_day = data.get("time", 0.9)
+	objective = data.get("objective", 0)
+	boss_defeated = data.get("boss_defeated", false)
+	escaped = data.get("escaped", false)
+	var rd = data.get("rocket", null)
+	if rd:
+		_spawn_rocket(rd["face"], rd["pos"])
+		if boss_defeated:
+			rocket.state = "ready"
+	for dd in data.get("drops", []):
+		spawn_drop(dd[0], dd[1], dd[2], Vector3.ZERO, 0.0)
+	if data.has("chests"):
+		world.chests = data["chests"]
+	if data.has("furnaces"):
+		world.furnaces = data["furnaces"]
+	if data.has("torch_wall"):
+		world.torch_wall = data["torch_wall"]
+	_enter_play()
+
+
+func _new_game(mode: String) -> void:
+	player.inv.clear()
+	player.inv.resize(player.INV_SIZE)
+	player.obtained = {}
+	player.stats = {"mined": 0, "placed": 0, "kills": 0, "deaths": 0, "time": 0.0}
+	player.creative = mode == "creative"
+	player.health = player.max_health
+	player.yaw = 0.0
+	player.pitch = -0.1
+	player.body.flying = false
+	var sp: Vector3 = world.find_spawn()
+	player.spawn_pos = sp
+	player.spawn_face = 2
+	player.spawn_at(sp, 2)
+	time_of_day = 0.92
+	objective = 0
+	boss_defeated = false
+	escaped = false
+	if player.creative:
+		for id in [B.GRASS, B.STONE_BRICKS, B.PLANKS, B.GLASS, B.TORCH, B.LAMP, B.TNT, B.DIAMOND_SWORD, B.DIAMOND_PICK]:
+			player.add_item(id, B.stack_max(id), false)
+	world_fresh = false
+	save_game()
+	_enter_play()
+
+
+func _enter_play() -> void:
 	player.dead = false
 	player.camera_current()
 	_update_objective_ui()
@@ -369,14 +482,28 @@ func save_game() -> void:
 	if world.world_seed == 0 and world.blocks.is_empty():
 		return
 	var d := {
-		"version": 1, "seed": world.world_seed, "edits": world.edits, "player": player.to_dict(),
+		"version": 1, "seed": world.world_seed, "edits": world.edits, "flow": world.save_flow(), "player": player.to_dict(),
 		"time": time_of_day, "objective": objective, "boss_defeated": boss_defeated, "escaped": escaped,
 		"rocket": {"face": rocket.face, "pos": rocket.base} if (rocket and is_instance_valid(rocket) and rocket.state != "launching") else null,
 		"drops": _drop_list(),
+		"chests": world.chests,
+		"furnaces": world.furnaces,
+		"torch_wall": world.torch_wall,
 	}
-	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if save_path == "":
+		return
+	var f := FileAccess.open(save_path, FileAccess.WRITE)
 	if f:
 		f.store_var(d)
+	var meta := {"name": save_path.get_file().get_basename(), "mode": "creative" if player.creative else "survival", "created": 0}
+	if FileAccess.file_exists(_meta_path(save_path)):
+		var parsed = JSON.parse_string(FileAccess.get_file_as_string(_meta_path(save_path)))
+		if parsed is Dictionary:
+			meta.merge(parsed, true)
+	meta["played"] = Time.get_unix_time_from_system()
+	meta["time"] = player.stats["time"]
+	meta["escaped"] = escaped
+	_write_meta(save_path, meta)
 
 
 func is_playing() -> bool:
@@ -518,6 +645,10 @@ func _process(dt: float) -> void:
 		"end":
 			_tick_entities(dt)
 			_update_sky(dt, Vector3(0, 1, 0), 0.25, false)
+	if state in ["play", "dead", "inventory", "confirm"]:
+		world.flow_tick(dt)
+		for i in world.furnaces:
+			_step_furnace(world.furnaces[i], dt)
 	_update_clouds(dt)
 	var muffle := 0.0
 	if state in ["play", "inventory", "dead"] and world.block_at(player.eye_pos()) == B.WATER:
@@ -785,10 +916,49 @@ func pop_drop(id: int, n: int, pos: Vector3, up: Vector3) -> void:
 	spawn_drop(id, n, pos, up * 3.5 + side * 1.5)
 
 
+## Pops out the items stored in a chest or furnace at `c` (being destroyed) and forgets its storage.
+func spill_storage(c: Vector3i, b: int) -> void:
+	var i := c.x + (c.y << 7) + (c.z << 14)
+	var items: Array = []
+	if b == B.CHEST:
+		items = world.chests.get(i, [])
+		world.chests.erase(i)
+	elif b == B.FURNACE and world.furnaces.has(i):
+		var fz: Dictionary = world.furnaces[i]
+		items = [fz["in"], fz["fuel"], fz["out"]]
+		world.furnaces.erase(i)
+	var pos := Vector3(c) + Vector3(0.5, 0.5, 0.5)
+	for s in items:
+		if s:
+			pop_drop(s["id"], s["n"], pos, VBody.UPS[world.face_of_pos(pos)])
+
+
+## Throws chunks of the blasted blocks outward; about a third come down as real item drops.
+func _blast_debris(center: Vector3, gone: Array) -> void:
+	gone.shuffle()
+	for g in gone:
+		if g[1] == B.CHEST or g[1] == B.FURNACE:
+			spill_storage(Vector3i((g[0] as Vector3).floor()), g[1])
+	for k in mini(gone.size(), 26):
+		var p: Vector3 = gone[k][0]
+		var b: int = gone[k][1]
+		var out := (p - center).normalized() if p.distance_to(center) > 0.1 else Vector3(randf_range(-1, 1), 1, randf_range(-1, 1)).normalized()
+		var up: Vector3 = VBody.UPS[world.face_of_pos(p)]
+		var vel := out * randf_range(4.0, 9.0) + up * randf_range(3.0, 7.0)
+		var drop_id: int = B.info[b].get("drop", b) if B.info.has(b) else b
+		if randf() < 0.33 and drop_id > 0:
+			spawn_drop(drop_id, 1, p, vel * 0.6, 0.8)
+		else:
+			var d := DropScript.new()
+			add_child(d)
+			d.setup(self, world, b, 1, p, vel, 999.0, true)
+			entities.append(d)
+
+
 func _drop_list() -> Array:
 	var out := []
 	for e in entities:
-		if e is DropScript and is_instance_valid(e) and not e.dead:
+		if e is DropScript and is_instance_valid(e) and not e.dead and not e.debris:
 			out.append([e.id, e.n, e.body.pos])
 	return out
 
@@ -814,7 +984,7 @@ func shake_camera(a: float) -> void:
 func explode(pos: Vector3, radius: float, dmg: float, no_terrain_near_rocket := false) -> void:
 	var protect: bool = rocket != null and is_instance_valid(rocket) and pos.distance_to(rocket.base) < radius + 4.0
 	if radius > 0.0 and not protect:
-		world.explode(pos, radius)
+		_blast_debris(pos, world.explode(pos, radius))
 	var reach := maxf(radius * 2.2, 3.0)
 	if dmg > 0.0:
 		var d: float = player.body.center().distance_to(pos)
@@ -969,7 +1139,7 @@ func _update_objective_ui() -> void:
 # ---------------- crafting ----------------
 
 func station_status() -> Dictionary:
-	var out := {"table": false, "furnace": false}
+	var out := {"table": false}
 	var c: Vector3 = player.body.center()
 	var cx := floori(c.x)
 	var cy := floori(c.y)
@@ -977,26 +1147,21 @@ func station_status() -> Dictionary:
 	for z in range(cz - 4, cz + 5):
 		for y in range(cy - 4, cy + 5):
 			for x in range(cx - 4, cx + 5):
-				var b: int = world.get_b(x, y, z)
-				if b == B.CRAFTING_TABLE:
+				if world.get_b(x, y, z) == B.CRAFTING_TABLE:
 					out["table"] = true
-				elif b == B.FURNACE:
-					out["furnace"] = true
+					return out
 	return out
 
 
-func _has_fuel() -> bool:
-	return player.fuel > 0 or player.count(B.COAL) > 0 or player.count(B.G_LOG) > 0 or player.count(B.G_PLANKS) > 0
-
-
+## Furnace recipes are not crafted: they only describe what a furnace smelts (see _step_furnace).
 func can_craft(r: Dictionary, st = null) -> bool:
+	if r["st"] == "furnace":
+		return false
 	if player.creative:
 		return true
 	if st == null:
 		st = station_status()
 	if r["st"] == "table" and not st["table"]:
-		return false
-	if r["st"] == "furnace" and (not st["furnace"] or not _has_fuel()):
 		return false
 	for id in r["in"]:
 		if player.count(id) < r["in"][id]:
@@ -1007,29 +1172,15 @@ func can_craft(r: Dictionary, st = null) -> bool:
 func craft(r: Dictionary) -> bool:
 	var st := station_status()
 	if not can_craft(r, st):
-		if r["st"] == "table" and not st["table"]:
+		if r["st"] == "furnace":
+			ui.toast("Smelt this in a Furnace.")
+		elif r["st"] == "table" and not st["table"]:
 			ui.toast("You need to be near a Crafting Table.")
-		elif r["st"] == "furnace" and not st["furnace"]:
-			ui.toast("You need to be near a Furnace.")
-		elif r["st"] == "furnace" and not _has_fuel():
-			ui.toast("The furnace needs fuel: coal, logs or planks.")
 		else:
 			ui.toast("Missing ingredients.")
 		Sfx.play("click", -4.0, 0.6)
 		return false
 	if not player.creative:
-		if r["st"] == "furnace":
-			if player.fuel <= 0:
-				if player.count(B.COAL) > 0:
-					player.remove(B.COAL, 1)
-					player.fuel += 8
-				elif player.count(B.G_LOG) > 0:
-					player.remove(B.G_LOG, 1)
-					player.fuel += 3
-				else:
-					player.remove(B.G_PLANKS, 1)
-					player.fuel += 1
-			player.fuel -= 1
 		for id in r["in"]:
 			player.remove(id, r["in"][id])
 	var left: int = player.add_item(r["out"], r["n"])
@@ -1038,6 +1189,39 @@ func craft(r: Dictionary) -> bool:
 	Sfx.play("craft", -4.0, randf_range(0.95, 1.08))
 	_check_objectives()
 	return true
+
+
+## Advances one furnace by `dt`. Fuel is only lit while the input can smelt into the output slot;
+## once lit it burns down regardless. Each item takes B.SMELT_TIME seconds.
+func _step_furnace(fz: Dictionary, dt: float) -> void:
+	var src = fz["in"]
+	var res: Array = B.smelts.get(src["id"], []) if src else []
+	var out = fz["out"]
+	var can: bool = not res.is_empty() and (out == null or (out["id"] == res[0] and out["n"] + res[1] <= B.stack_max(res[0])))
+	if fz["burn"] <= 0.0:
+		var fuel = fz["fuel"]
+		if not can or fuel == null or not B.fuels.has(fuel["id"]):
+			fz["prog"] = maxf(0.0, fz["prog"] - dt * 2.0)
+			return
+		fz["burn"] = B.fuels[fuel["id"]]
+		fz["burn_max"] = fz["burn"]
+		fuel["n"] -= 1
+		if fuel["n"] <= 0:
+			fz["fuel"] = null
+	fz["burn"] = maxf(0.0, fz["burn"] - dt)
+	if not can:
+		fz["prog"] = 0.0
+		return
+	fz["prog"] += dt
+	if fz["prog"] >= B.SMELT_TIME:
+		fz["prog"] = 0.0
+		if out:
+			out["n"] += res[1]
+		else:
+			fz["out"] = {"id": res[0], "n": res[1]}
+		src["n"] -= 1
+		if src["n"] <= 0:
+			fz["in"] = null
 
 
 # ---------------- rocket & boss ----------------

@@ -58,6 +58,7 @@ const MAGMA := 52
 const SPRUCE_PLANKS := 53
 const BIRCH_PLANKS := 54
 const SMOOTH_STONE := 55
+const CHEST := 56
 
 # --- items (100+) ---
 const STICK := 100
@@ -91,6 +92,22 @@ const ROCKET_ENGINE := 131
 const FUEL_CELL := 132
 const NAV_CORE := 133
 const ROCKET := 134
+const BUCKET := 135
+const WATER_BUCKET := 136
+const LAVA_BUCKET := 137
+const SHIELD := 138
+const IRON_HELMET := 139
+const IRON_CHESTPLATE := 140
+const IRON_LEGGINGS := 141
+const IRON_BOOTS := 142
+const DIAMOND_HELMET := 143
+const DIAMOND_CHESTPLATE := 144
+const DIAMOND_LEGGINGS := 145
+const DIAMOND_BOOTS := 146
+
+## Armor piece names by slot index (0 helmet .. 3 boots) and points per material (iron, diamond).
+const ARMOR_PARTS := ["Helmet", "Chestplate", "Leggings", "Boots"]
+const ARMOR_POINTS := [[2, 6, 5, 2], [3, 8, 6, 3]]
 
 # ingredient groups (negative ids)
 const G_PLANKS := -1
@@ -106,6 +123,7 @@ const R_TORCH := 5
 
 const TIER_NAMES := ["Hand", "Wood", "Stone", "Iron", "Diamond"]
 const MAT_COLORS := [Color(0.62, 0.45, 0.25), Color(0.55, 0.55, 0.55), Color(0.86, 0.86, 0.88), Color(0.35, 0.95, 0.92)]
+const SMELT_TIME := 2.5  # seconds per item in a furnace
 
 var info := {}
 var SOLID := PackedByteArray()
@@ -123,6 +141,8 @@ var tex_index := {}
 var recipes: Array = []
 var block_list: Array[int] = []
 var item_list: Array[int] = []
+var smelts := {}  # input id -> [output id, count], from the single-ingredient furnace recipes
+var fuels := {}  # item id -> burn seconds
 
 
 func _init() -> void:
@@ -139,6 +159,15 @@ func _init() -> void:
 	_register_blocks()
 	_register_items()
 	_register_recipes()
+	for r in recipes:
+		if r["st"] == "furnace" and r["in"].size() == 1:
+			smelts[r["in"].keys()[0]] = [r["out"], r["n"]]
+	fuels[COAL] = 20.0
+	fuels[STICK] = 1.25
+	for id in group_members(G_LOG):
+		fuels[id] = 7.5
+	for id in group_members(G_PLANKS):
+		fuels[id] = 3.75
 
 
 func _tex(n: String) -> int:
@@ -226,13 +255,14 @@ func _register_blocks() -> void:
 	_blk(SPRUCE_PLANKS, "Spruce Planks", "spruce_planks", 2.0, "axe", 0, {"sound": "wood"})
 	_blk(BIRCH_PLANKS, "Birch Planks", "birch_planks", 2.0, "axe", 0, {"sound": "wood"})
 	_blk(SMOOTH_STONE, "Smooth Stone", "smooth_stone", 2.0, "pick", 1)
+	_blk(CHEST, "Chest", ["chest_top", "chest_front", "chest_top"], 1.2, "axe", 0, {"sound": "wood"})
 
 
 func _item(id: int, nm: String, ex := {}) -> void:
 	info[id] = {
 		"name": nm, "block": false, "stack": ex.get("stack", 64), "tool": ex.get("tool", ""),
 		"tier": ex.get("tier", 0), "speed": ex.get("speed", 1.0), "dmg": ex.get("dmg", 1.0),
-		"food": ex.get("food", 0), "desc": ex.get("desc", ""),
+		"food": ex.get("food", 0), "desc": ex.get("desc", ""), "armor": ex.get("armor", 0), "slot": ex.get("slot", -1),
 	}
 	item_list.append(id)
 
@@ -260,6 +290,14 @@ func _register_items() -> void:
 	_item(FUEL_CELL, "Fuel Cell", {"stack": 8})
 	_item(NAV_CORE, "Navigation Core", {"stack": 1})
 	_item(ROCKET, "Rocket", {"stack": 1, "desc": "Place on open ground, then right-click it."})
+	_item(BUCKET, "Bucket", {"stack": 16, "desc": "Right-click a water or lava source to scoop it up."})
+	_item(WATER_BUCKET, "Water Bucket", {"stack": 1, "desc": "Right-click to pour. Saves you from a long fall."})
+	_item(LAVA_BUCKET, "Lava Bucket", {"stack": 1, "desc": "Right-click to pour. Careful!"})
+	_item(SHIELD, "Shield", {"stack": 1, "desc": "Hold Right Mouse to block hits from the front. F: move to offhand."})
+	for m in 2:
+		for k in 4:
+			_item(IRON_HELMET + m * 4 + k, "%s %s" % [["Iron", "Diamond"][m], ARMOR_PARTS[k]],
+				{"stack": 1, "armor": ARMOR_POINTS[m][k], "slot": k})
 
 
 func _rec(out: int, n: int, ingredients: Dictionary, station := "") -> void:
@@ -286,7 +324,7 @@ func _register_recipes() -> void:
 	_rec(GLASS, 1, {SAND: 1}, "furnace")
 	_rec(SMOOTH_STONE, 1, {COBBLE: 1}, "furnace")
 	_rec(COOKED_MEAT, 1, {RAW_MEAT: 1}, "furnace")
-	_rec(BRICKS, 4, {GRAVEL: 2, SAND: 2}, "furnace")
+	_rec(BRICKS, 4, {GRAVEL: 2, SAND: 2}, "table")
 	_rec(STONE_BRICKS, 4, {SMOOTH_STONE: 4}, "table")
 	_rec(SANDSTONE, 2, {SAND: 4}, "table")
 	_rec(IRON_BLOCK, 1, {IRON_INGOT: 9}, "table")
@@ -306,6 +344,13 @@ func _register_recipes() -> void:
 	_rec(FUEL_CELL, 1, {COAL: 6, STARCORE: 1}, "table")
 	_rec(NAV_CORE, 1, {DIAMOND: 2, GOLD_INGOT: 2, STARCORE: 1}, "table")
 	_rec(ROCKET, 1, {ROCKET_HULL: 1, ROCKET_ENGINE: 1, FUEL_CELL: 3, NAV_CORE: 1}, "table")
+	_rec(CHEST, 1, {G_PLANKS: 8}, "table")
+	_rec(BUCKET, 1, {IRON_INGOT: 3}, "table")
+	_rec(SHIELD, 1, {G_PLANKS: 6, IRON_INGOT: 1}, "table")
+	var armor_cost := [5, 8, 7, 4]
+	for k in 4:
+		_rec(IRON_HELMET + k, 1, {IRON_INGOT: armor_cost[k]}, "table")
+		_rec(DIAMOND_HELMET + k, 1, {DIAMOND: armor_cost[k]}, "table")
 
 
 func is_block(id: int) -> bool:
@@ -336,3 +381,12 @@ func tool_of(id: int) -> Dictionary:
 	if id >= 100 and info.has(id) and info[id]["tool"] != "":
 		return info[id]
 	return {}
+
+
+## Armor slot (0 helmet .. 3 boots) for an armor item, else -1.
+func armor_slot(id: int) -> int:
+	return info[id]["slot"] if id >= 100 and info.has(id) else -1
+
+
+func armor_points(id: int) -> int:
+	return info[id]["armor"] if id >= 100 and info.has(id) else 0

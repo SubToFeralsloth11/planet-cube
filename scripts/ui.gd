@@ -2,6 +2,13 @@ extends CanvasLayer
 ## HUD, menus, inventory and crafting screens (all built in code).
 
 const SLOT := 58
+const CHEST0 := 100  # UI slot index of the first chest slot (inventory slots are 0..40)
+const FURN_IN := 200  # UI slot indexes of the open furnace's input, fuel and output
+const FURN_FUEL := 201
+const FURN_OUT := 202
+const FURN_KEYS := ["in", "fuel", "out"]
+const FLAME := ["....#......", "....##.....", "...###.....", "...####....", "..#####.#..", "..#######..",
+	".#########.", ".#########.", "###########", "###########", ".#########.", "..#######.."]
 const ACCENT := Color(1.0, 0.62, 0.2)
 const ACCENT_DARK := Color(0.72, 0.38, 0.08)
 const TEAL := Color(0.38, 0.9, 0.95)
@@ -38,6 +45,10 @@ var hotbar: HBoxContainer
 var hot_slots: Array[Control] = []
 var hearts: HBoxContainer
 var heart_rects: Array[TextureRect] = []
+var armor_row: HBoxContainer
+var armor_rects: Array[TextureRect] = []
+var hot_panel: PanelContainer
+var off_slot: Panel
 var heart_flash := 0.0
 var heal_t := 0.0
 var last_health := 20.0
@@ -98,6 +109,14 @@ var confirm_label: Label
 var confirm_cb: Callable
 var help_screen: Control
 var settings_screen: Control
+var worlds_screen: Control
+var world_list: VBoxContainer
+var create_screen: Control
+var create_name: LineEdit
+var create_seed: LineEdit
+var create_mode := "survival"
+var create_mode_btns := {}
+var create_mode_desc: Label
 var settings_back := "title"
 var screen_name := ""
 var t := 0.0
@@ -105,6 +124,15 @@ var t := 0.0
 var inv_screen: Control
 var inv_panel: PanelContainer
 var inv_slots: Array[Control] = []
+var chest_slots: Array[Control] = []
+var chest_box: VBoxContainer
+var inv_right: VBoxContainer
+var chest_idx := -1
+var furnace_idx := -1
+var furnace_box: VBoxContainer
+var furn_slots: Array[Control] = []
+var furn_flame: Control
+var furn_arrow: Control
 var hover_slot := -1
 var craft_list: VBoxContainer
 var craft_status: HBoxContainer
@@ -134,6 +162,8 @@ func setup(m) -> void:
 	_build_loading()
 	_build_pause()
 	_build_settings()
+	_build_worlds()
+	_build_create()
 	_build_death()
 	_build_end()
 	_build_confirm()
@@ -421,14 +451,17 @@ func _slot_panel(selected := false, key := "") -> Panel:
 	return p
 
 
-func _set_slot(p: Control, s) -> void:
+## `ghost` = item drawn as a faint silhouette while the slot is empty (armor / offhand placeholders).
+func _set_slot(p: Control, s, ghost := 0) -> void:
 	var icon: TextureRect = p.get_node("Icon")
 	var cnt: Label = p.get_node("Count")
+	icon.modulate = Color.WHITE
 	if s:
 		icon.texture = T.icon(s["id"])
 		cnt.text = str(s["n"]) if s["n"] > 1 else ""
 	else:
-		icon.texture = null
+		icon.texture = T.icon(ghost) if ghost > 0 else null
+		icon.modulate = Color(0, 0, 0, 0.4)
 		cnt.text = ""
 
 
@@ -439,7 +472,7 @@ func _set_slot_selected(p: Panel, selected: bool, hover := false) -> void:
 func rarity_color(id: int) -> Color:
 	if id == B.STARCORE or id == B.STARCORE_ORE or id in [B.ROCKET, B.ROCKET_HULL, B.ROCKET_ENGINE, B.FUEL_CELL, B.NAV_CORE]:
 		return Color(0.95, 0.55, 1.0)
-	if id == B.DIAMOND or id == B.DIAMOND_ORE or (id >= B.WOOD_PICK and id <= B.DIAMOND_SWORD and (id - B.WOOD_PICK) % 4 == 3):
+	if id == B.DIAMOND or id == B.DIAMOND_ORE or (id >= B.WOOD_PICK and id <= B.DIAMOND_SWORD and (id - B.WOOD_PICK) % 4 == 3) or (id >= B.DIAMOND_HELMET and id <= B.DIAMOND_BOOTS):
 		return TEAL
 	if id == B.GOLD_INGOT or id == B.GOLD_ORE:
 		return Color(1.0, 0.85, 0.3)
@@ -546,6 +579,22 @@ func _build_bottom() -> void:
 	col.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	col.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bottom.add_child(col)
+	armor_row = HBoxContainer.new()
+	armor_row.add_theme_constant_override("separation", 3)
+	armor_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	armor_row.visible = false
+	col.add_child(armor_row)
+	var apad := Control.new()
+	apad.custom_minimum_size = Vector2(8, 0)
+	armor_row.add_child(apad)
+	for i in 10:
+		var a := TextureRect.new()
+		a.texture = T.armor_full
+		a.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		a.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		a.custom_minimum_size = Vector2(27, 21)
+		armor_row.add_child(a)
+		armor_rects.append(a)
 	hearts = HBoxContainer.new()
 	hearts.add_theme_constant_override("separation", 1)
 	hearts.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -562,7 +611,8 @@ func _build_bottom() -> void:
 		h.pivot_offset = Vector2(16.5, 13.5)
 		hearts.add_child(h)
 		heart_rects.append(h)
-	var bar := PanelContainer.new()
+	hot_panel = PanelContainer.new()
+	var bar := hot_panel
 	var bs := _sb(Color(0.04, 0.05, 0.07, 0.7), 14, Color(1, 1, 1, 0.08), 1, 6)
 	bs.shadow_color = Color(0, 0, 0, 0.35)
 	bs.shadow_size = 10
@@ -578,6 +628,9 @@ func _build_bottom() -> void:
 		p.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		hotbar.add_child(p)
 		hot_slots.append(p)
+	off_slot = _slot_panel()
+	off_slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.add_child(off_slot)
 
 
 func _build_objective() -> void:
@@ -748,6 +801,7 @@ func refresh_hotbar() -> void:
 		_set_slot(hot_slots[i], p.inv[i])
 		_set_slot_selected(hot_slots[i], i == p.sel)
 		hot_slots[i].scale = Vector2(1.08, 1.08) if i == p.sel else Vector2.ONE
+	_set_slot(off_slot, p.inv[p.OFFHAND], B.SHIELD)
 	var id: int = p.held_id()
 	var nm := B.item_name(id) if id > 0 else ""
 	if nm != held_label.text:
@@ -868,6 +922,14 @@ func update_hud(dt: float) -> void:
 	held_t -= dt
 	held_label.modulate.a = clampf(held_t, 0.0, 1.0)
 	hearts.visible = not p.creative
+	var armor: int = p.armor_points()
+	armor_row.visible = armor > 0 and not p.creative
+	if armor_row.visible:
+		for i in 10:
+			var a: int = armor - i * 2
+			armor_rects[i].texture = T.armor_full if a >= 2 else (T.armor_half if a >= 1 else T.armor_empty)
+	var hr := hot_panel.get_global_rect()
+	off_slot.global_position = Vector2(hr.position.x - SLOT - 12, hr.position.y + (hr.size.y - SLOT) * 0.5)
 	heart_flash = maxf(0.0, heart_flash - dt * 3.0)
 	heal_t = maxf(0.0, heal_t - dt * 2.0)
 	var low: bool = p.health <= 6.0 and not p.creative
@@ -920,6 +982,8 @@ func update_hud(dt: float) -> void:
 			node.queue_free()
 			feed_items.erase(id)
 	if inv_screen.visible:
+		if furnace_idx >= 0:
+			refresh_furnace()
 		var mp := root.get_local_mouse_position()
 		cursor_icon.position = mp - Vector2(24, 24)
 		cursor_label.position = mp + Vector2(2, 4)
@@ -975,14 +1039,17 @@ func fade_in(secs := 0.6) -> void:
 func show_screen(name: String) -> void:
 	var prev := screen_name
 	screen_name = name
-	for s in [title_screen, loading_screen, pause_screen, death_screen, end_screen, confirm_screen, inv_screen, help_screen, settings_screen]:
+	for s in [title_screen, loading_screen, pause_screen, death_screen, end_screen, confirm_screen, inv_screen, help_screen, settings_screen, worlds_screen, create_screen]:
 		s.visible = false
 	hud.visible = name == "" or name == "inventory" or name == "confirm"
 	var shown: Control = null
 	match name:
 		"title":
 			shown = title_screen
-			continue_btn.visible = main.has_save()
+			var worlds: Array = main.list_worlds()
+			continue_btn.visible = not worlds.is_empty()
+			if not worlds.is_empty():
+				continue_btn.text = "Continue:  " + str(worlds[0]["name"])
 			splash.text = SPLASHES[randi() % SPLASHES.size()]
 		"loading":
 			shown = loading_screen
@@ -1002,6 +1069,14 @@ func show_screen(name: String) -> void:
 			shown = help_screen
 		"settings":
 			shown = settings_screen
+		"worlds":
+			shown = worlds_screen
+			_refresh_worlds()
+		"create":
+			shown = create_screen
+			create_name.text = "World %d" % (main.list_worlds().size() + 1)
+			create_seed.text = ""
+			_set_create_mode("survival")
 	if shown:
 		shown.visible = true
 		if prev != name and name != "loading":
@@ -1055,8 +1130,8 @@ void fragment() {
 	v.add_child(sp)
 	continue_btn = _button("Continue", func(): main.start_game("continue"))
 	v.add_child(continue_btn)
-	v.add_child(_button("New Survival World", func(): main.start_game("survival")))
-	v.add_child(_button("New Creative World", func(): main.start_game("creative")))
+	v.add_child(_button("Worlds", func(): show_screen("worlds")))
+	v.add_child(_button("New World", func(): show_screen("create")))
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 10)
 	v.add_child(row)
@@ -1223,6 +1298,137 @@ func _check_row(grid: GridContainer, text: String, key: String) -> void:
 	grid.add_child(Control.new())
 
 
+# ---------------- worlds ----------------
+
+func _line_edit(placeholder: String) -> LineEdit:
+	var le := LineEdit.new()
+	le.placeholder_text = placeholder
+	le.custom_minimum_size = Vector2(420, 46)
+	le.add_theme_font_size_override("font_size", 19)
+	le.add_theme_stylebox_override("normal", _sb(Color(0, 0, 0, 0.45), 8, Color(1, 1, 1, 0.15), 1, 10))
+	le.add_theme_stylebox_override("focus", _sb(Color(0, 0, 0, 0.55), 8, ACCENT, 2, 10))
+	le.add_theme_color_override("caret_color", ACCENT)
+	return le
+
+
+func _ago(unix: float) -> String:
+	var s := Time.get_unix_time_from_system() - unix
+	if unix <= 0:
+		return "never"
+	if s < 90:
+		return "just now"
+	if s < 3600:
+		return "%d min ago" % int(s / 60)
+	if s < 86400:
+		return "%d h ago" % int(s / 3600)
+	return "%d days ago" % int(s / 86400)
+
+
+func _build_worlds() -> void:
+	worlds_screen = _screen(0.6)
+	var v := _center_box(worlds_screen)
+	var inner := _card(v, 12)
+	inner.add_child(_heading("WORLDS", 36))
+	var sc := ScrollContainer.new()
+	sc.custom_minimum_size = Vector2(680, 400)
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	inner.add_child(sc)
+	world_list = VBoxContainer.new()
+	world_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	world_list.add_theme_constant_override("separation", 8)
+	sc.add_child(world_list)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 14)
+	inner.add_child(row)
+	row.add_child(_button("New World", func(): show_screen("create"), 240))
+	row.add_child(_button("Back", func(): show_screen("title"), 200))
+
+
+func _refresh_worlds() -> void:
+	for ch in world_list.get_children():
+		ch.queue_free()
+	var worlds: Array = main.list_worlds()
+	if worlds.is_empty():
+		var l := _label("No worlds yet - make your first planet!", 18, MUTED)
+		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		world_list.add_child(l)
+		return
+	for w in worlds:
+		var pc := PanelContainer.new()
+		pc.add_theme_stylebox_override("panel", _sb(Color(0.15, 0.17, 0.23, 0.95), 10, Color(1, 1, 1, 0.08), 1, 12))
+		world_list.add_child(pc)
+		var hb := HBoxContainer.new()
+		hb.add_theme_constant_override("separation", 12)
+		pc.add_child(hb)
+		var info := VBoxContainer.new()
+		info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		info.add_theme_constant_override("separation", 2)
+		hb.add_child(info)
+		info.add_child(_label(str(w["name"]), 21, Color.WHITE, 0, font_b))
+		var mode := "Creative" if w["mode"] == "creative" else "Survival"
+		var sub := "%s  ·  %d min played  ·  last played %s" % [mode, int(w["time"]) / 60, _ago(w["played"])]
+		if w.get("escaped", false):
+			sub += "  ·  ✦ Escaped"
+		info.add_child(_label(sub, 14, MUTED))
+		var path: String = w["path"]
+		var play := _button("Play", func(): main.play_world(path), 120)
+		play.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		hb.add_child(play)
+		var del := _button("Delete", func(): pass, 120)
+		del.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		# Two-step delete: the first click arms it, the second removes the world.
+		del.pressed.connect(func():
+			if del.text == "Delete":
+				del.text = "Sure?"
+				del.add_theme_color_override("font_color", BAD)
+			else:
+				main.delete_world(path)
+				_refresh_worlds())
+		hb.add_child(del)
+
+
+func _set_create_mode(mode: String) -> void:
+	create_mode = mode
+	for m in create_mode_btns:
+		var b: Button = create_mode_btns[m]
+		b.add_theme_stylebox_override("normal", _sb(ACCENT if m == mode else Color(0.17, 0.19, 0.26, 0.96), 10, Color(0, 0, 0, 0), 0, 12))
+		b.add_theme_color_override("font_color", Color(0.12, 0.06, 0.0) if m == mode else Color(0.95, 0.96, 1.0))
+	create_mode_desc.text = "Gather, craft, survive the night and escape the planet." if mode == "survival" else "Unlimited blocks, flying, no damage. Build anything."
+
+
+func _build_create() -> void:
+	create_screen = _screen(0.6)
+	var v := _center_box(create_screen)
+	var inner := _card(v, 10)
+	inner.add_child(_heading("NEW WORLD", 36))
+	inner.add_child(_label("World name", 16, MUTED, 0, font_b))
+	create_name = _line_edit("My Planet")
+	inner.add_child(create_name)
+	inner.add_child(_label("Game mode", 16, MUTED, 0, font_b))
+	var modes := HBoxContainer.new()
+	modes.add_theme_constant_override("separation", 10)
+	inner.add_child(modes)
+	for m in ["survival", "creative"]:
+		var b := _button(m.capitalize(), func(): _set_create_mode(m), 205)
+		modes.add_child(b)
+		create_mode_btns[m] = b
+	create_mode_desc = _label("", 15, MUTED)
+	inner.add_child(create_mode_desc)
+	inner.add_child(_label("Seed (optional)", 16, MUTED, 0, font_b))
+	create_seed = _line_edit("Leave blank for a random planet")
+	inner.add_child(create_seed)
+	var sp := Control.new()
+	sp.custom_minimum_size = Vector2(0, 6)
+	inner.add_child(sp)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 14)
+	inner.add_child(row)
+	row.add_child(_button("Create World", func(): main.create_world(create_name.text, create_mode, create_seed.text), 240))
+	row.add_child(_button("Back", func(): show_screen("title"), 200))
+
+
 func _build_settings() -> void:
 	settings_screen = _screen(0.45, true)
 	var v := _center_box(settings_screen)
@@ -1350,16 +1556,65 @@ func _build_inventory() -> void:
 	var hb := HBoxContainer.new()
 	hb.add_theme_constant_override("separation", 28)
 	inv_panel.add_child(hb)
+	var gear := VBoxContainer.new()
+	gear.add_theme_constant_override("separation", 5)
+	hb.add_child(gear)
+	gear.add_child(_label("GEAR", 13, MUTED, 0, font_x))
+	inv_slots.resize(41)
+	for k in 4:
+		gear.add_child(_inv_slot(36 + k, ""))
+	var gsp := Control.new()
+	gsp.custom_minimum_size = Vector2(0, 10)
+	gear.add_child(gsp)
+	gear.add_child(_label("OFFHAND", 13, MUTED, 0, font_x))
+	gear.add_child(_inv_slot(40, "F"))
 	var left := VBoxContainer.new()
 	left.add_theme_constant_override("separation", 8)
 	hb.add_child(left)
+	chest_box = VBoxContainer.new()
+	chest_box.add_theme_constant_override("separation", 8)
+	left.add_child(chest_box)
+	chest_box.add_child(_label("CHEST", 24, ACCENT, 0, font_x))
+	var cgrid := GridContainer.new()
+	cgrid.columns = 9
+	cgrid.add_theme_constant_override("h_separation", 5)
+	cgrid.add_theme_constant_override("v_separation", 5)
+	chest_box.add_child(cgrid)
+	chest_slots.resize(27)
+	for k in 27:
+		cgrid.add_child(_inv_slot(CHEST0 + k, ""))
+	furnace_box = VBoxContainer.new()
+	furnace_box.add_theme_constant_override("separation", 8)
+	left.add_child(furnace_box)
+	furnace_box.add_child(_label("FURNACE", 24, ACCENT, 0, font_x))
+	var frow := HBoxContainer.new()
+	frow.add_theme_constant_override("separation", 18)
+	frow.alignment = BoxContainer.ALIGNMENT_CENTER
+	furnace_box.add_child(frow)
+	var fcol := VBoxContainer.new()
+	fcol.add_theme_constant_override("separation", 4)
+	frow.add_child(fcol)
+	furn_slots.resize(3)
+	fcol.add_child(_inv_slot(FURN_IN, ""))
+	furn_flame = Control.new()
+	furn_flame.custom_minimum_size = Vector2(SLOT, 42)
+	furn_flame.draw.connect(_draw_flame)
+	fcol.add_child(furn_flame)
+	fcol.add_child(_inv_slot(FURN_FUEL, ""))
+	furn_arrow = Control.new()
+	furn_arrow.custom_minimum_size = Vector2(72, 48)
+	furn_arrow.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	furn_arrow.draw.connect(_draw_arrow)
+	frow.add_child(furn_arrow)
+	var fout := _inv_slot(FURN_OUT, "")
+	fout.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	frow.add_child(fout)
 	left.add_child(_label("INVENTORY", 24, ACCENT, 0, font_x))
 	var grid := GridContainer.new()
 	grid.columns = 9
 	grid.add_theme_constant_override("h_separation", 5)
 	grid.add_theme_constant_override("v_separation", 5)
 	left.add_child(grid)
-	inv_slots.resize(36)
 	for i in range(9, 36):
 		grid.add_child(_inv_slot(i, ""))
 	var sp := Control.new()
@@ -1378,7 +1633,8 @@ func _build_inventory() -> void:
 	for pair in [["LMB", "pick up / place"], ["RMB", "split / one"], ["Shift", "quick move"], ["1-9", "to hotbar"]]:
 		help.add_child(_key_chip(pair[0]))
 		help.add_child(_label(pair[1] + "  ", 13, MUTED))
-	var right := VBoxContainer.new()
+	inv_right = VBoxContainer.new()
+	var right := inv_right
 	right.add_theme_constant_override("separation", 8)
 	right.custom_minimum_size = Vector2(500, 540)
 	hb.add_child(right)
@@ -1467,7 +1723,12 @@ func _inv_slot(i: int, key: String) -> Panel:
 			hover_slot = -1
 		_hide_tip()
 		refresh_inventory())
-	inv_slots[i] = p
+	if i >= FURN_IN:
+		furn_slots[i - FURN_IN] = p
+	elif i >= CHEST0:
+		chest_slots[i - CHEST0] = p
+	else:
+		inv_slots[i] = p
 	return p
 
 
@@ -1490,7 +1751,9 @@ func _item_desc(id: int) -> String:
 				lines.append("%.1f attack damage" % tool["dmg"])
 		if info["food"] > 0:
 			lines.append("Restores %d health  ·  Hold Right Mouse to eat" % info["food"])
-		if info["desc"] != "":
+		if info["armor"] > 0:
+			lines.append("+%d armor  ·  Right-click to wear" % info["armor"])
+		elif info["desc"] != "":
 			lines.append(info["desc"])
 	return "\n".join(lines)
 
@@ -1510,6 +1773,10 @@ func _hide_tip() -> void:
 
 func open_inventory() -> void:
 	var cr: bool = main.player.creative
+	var chest := chest_idx >= 0
+	chest_box.visible = chest
+	furnace_box.visible = furnace_idx >= 0
+	inv_right.visible = not chest and furnace_idx < 0
 	craft_scroll.visible = not cr
 	craftable_only.visible = not cr
 	craft_status.visible = not cr
@@ -1527,16 +1794,57 @@ func close_inventory() -> void:
 	if cursor_stack:
 		main.player.add_item(cursor_stack["id"], cursor_stack["n"], false)
 		cursor_stack = null
+	chest_idx = -1
+	furnace_idx = -1
 	_hide_tip()
 	_update_cursor()
 
 
+## Contents of UI slot `i`: player inventory (0..40), the open chest (CHEST0..CHEST0+26) or the open
+## furnace (FURN_IN, FURN_FUEL, FURN_OUT).
+func _get_slot(i: int):
+	if i >= FURN_IN:
+		return main.world.furnace_at(furnace_idx)[FURN_KEYS[i - FURN_IN]]
+	if i >= CHEST0:
+		return main.world.chest_inv(chest_idx)[i - CHEST0]
+	return main.player.inv[i]
+
+
+func _put_slot(i: int, s) -> void:
+	if i >= FURN_IN:
+		main.world.furnace_at(furnace_idx)[FURN_KEYS[i - FURN_IN]] = s
+	elif i >= CHEST0:
+		main.world.chest_inv(chest_idx)[i - CHEST0] = s
+	else:
+		main.player.inv[i] = s
+
+
 func refresh_inventory() -> void:
 	var p = main.player
-	for i in 36:
-		_set_slot(inv_slots[i], p.inv[i])
+	for i in p.INV_SIZE:
+		var ghost := 0
+		if i >= p.ARMOR0 and i < p.OFFHAND:
+			ghost = B.IRON_HELMET + i - p.ARMOR0
+		elif i == p.OFFHAND:
+			ghost = B.SHIELD
+		_set_slot(inv_slots[i], p.inv[i], ghost)
 		_set_slot_selected(inv_slots[i], i == p.sel, i == hover_slot)
+	if chest_idx >= 0:
+		for k in 27:
+			_set_slot(chest_slots[k], _get_slot(CHEST0 + k))
+			_set_slot_selected(chest_slots[k], false, CHEST0 + k == hover_slot)
+	if furnace_idx >= 0:
+		refresh_furnace()
 	_update_cursor()
+
+
+## Furnace slots, flame and arrow; also refreshed every frame while open since it keeps smelting.
+func refresh_furnace() -> void:
+	for k in 3:
+		_set_slot(furn_slots[k], _get_slot(FURN_IN + k))
+		_set_slot_selected(furn_slots[k], false, FURN_IN + k == hover_slot)
+	furn_flame.queue_redraw()
+	furn_arrow.queue_redraw()
 
 
 func _update_cursor() -> void:
@@ -1549,7 +1857,7 @@ func _update_cursor() -> void:
 
 
 func _slot_hover(i: int) -> void:
-	var s = main.player.inv[i]
+	var s = _get_slot(i)
 	if s and cursor_stack == null:
 		_show_tip(s["id"])
 	else:
@@ -1564,37 +1872,86 @@ func _input(event: InputEvent) -> void:
 		var p = main.player
 		if k != hover_slot:
 			var tmp = p.inv[k]
-			p.inv[k] = p.inv[hover_slot]
-			p.inv[hover_slot] = tmp
-			Sfx.play("click", -10.0, 1.2)
-			main.on_inventory_changed()
-			_slot_hover(hover_slot)
+			if tmp and not _accepts(hover_slot, tmp["id"]):
+				Sfx.play("deny", -10.0)
+			else:
+				p.inv[k] = _get_slot(hover_slot)
+				_put_slot(hover_slot, tmp)
+				if hover_slot == FURN_OUT and p.inv[k]:
+					p.note_obtained(p.inv[k]["id"])
+				Sfx.play("click", -10.0, 1.2)
+				main.on_inventory_changed()
+				_slot_hover(hover_slot)
 		get_viewport().set_input_as_handled()
+
+
+## Where shift-click sends the stack in slot `i`: chest/furnace <-> inventory while one is open
+## (smeltables to the furnace input, fuels below), armor straight onto its empty slot, gear back to
+## the inventory, otherwise hotbar <-> main grid.
+func _shift_dest(i: int, id: int) -> Array:
+	var p = main.player
+	if i >= CHEST0:
+		return range(0, p.SLOTS)
+	if chest_idx >= 0 and i < p.SLOTS:
+		return range(CHEST0, CHEST0 + 27)
+	if furnace_idx >= 0 and i < p.SLOTS:
+		if B.smelts.has(id):
+			return [FURN_IN]
+		if B.fuels.has(id):
+			return [FURN_FUEL]
+	var k := B.armor_slot(id)
+	if i < p.SLOTS and k >= 0 and p.inv[p.ARMOR0 + k] == null:
+		return [p.ARMOR0 + k]
+	if i >= p.SLOTS:
+		return range(9, p.SLOTS) + range(0, 9)
+	return range(9, p.SLOTS) if i < 9 else range(0, 9)
+
+
+## Whether `id` may be put in UI slot `i`: armor slots take their piece, the furnace fuel slot takes
+## fuel and its output takes nothing.
+func _accepts(i: int, id: int) -> bool:
+	if i == FURN_FUEL:
+		return B.fuels.has(id)
+	if i == FURN_OUT:
+		return false
+	return main.player.slot_accepts(i, id)
 
 
 func _slot_input(event: InputEvent, i: int) -> void:
 	if not (event is InputEventMouseButton and event.pressed):
 		return
 	var p = main.player
-	var s = p.inv[i]
+	var s = _get_slot(i)
+	# Clicking the furnace output with a matching stack in hand scoops the output onto it.
+	if i == FURN_OUT and cursor_stack and s and event.button_index == MOUSE_BUTTON_LEFT and not event.shift_pressed:
+		if s["id"] != cursor_stack["id"] or cursor_stack["n"] + s["n"] > B.stack_max(s["id"]):
+			Sfx.play("deny", -10.0)
+			return
+		cursor_stack["n"] += s["n"]
+		_put_slot(i, null)
+		_slot_changed(i, s)
+		return
+	if cursor_stack and not _accepts(i, cursor_stack["id"]) and event.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT]:
+		Sfx.play("deny", -10.0)
+		return
 	if event.button_index == MOUSE_BUTTON_LEFT and event.shift_pressed and s:
-		var dest_range := range(9, 36) if i < 9 else range(0, 9)
+		var dest_range := _shift_dest(i, s["id"])
 		var moved := false
 		for j in dest_range:
-			var d = p.inv[j]
+			var d = _get_slot(j)
 			if d and d["id"] == s["id"] and d["n"] < B.stack_max(s["id"]):
 				var k := mini(B.stack_max(s["id"]) - d["n"], s["n"])
 				d["n"] += k
 				s["n"] -= k
 				moved = true
 				if s["n"] <= 0:
-					p.inv[i] = null
+					_put_slot(i, null)
 					break
-		if p.inv[i] != null:
+		if _get_slot(i) != null:
 			for j in dest_range:
-				if p.inv[j] == null:
-					p.inv[j] = s
-					p.inv[i] = null
+				if _get_slot(j) == null:
+					_put_slot(j, s)
+					_put_slot(i, null)
 					moved = true
 					break
 		if not moved:
@@ -1602,10 +1959,10 @@ func _slot_input(event: InputEvent, i: int) -> void:
 			return
 	elif event.button_index == MOUSE_BUTTON_LEFT:
 		if cursor_stack == null:
-			p.inv[i] = null
+			_put_slot(i, null)
 			cursor_stack = s
 		elif s == null:
-			p.inv[i] = cursor_stack
+			_put_slot(i, cursor_stack)
 			cursor_stack = null
 		elif s["id"] == cursor_stack["id"]:
 			var mx := B.stack_max(s["id"])
@@ -1615,7 +1972,7 @@ func _slot_input(event: InputEvent, i: int) -> void:
 			if cursor_stack["n"] <= 0:
 				cursor_stack = null
 		else:
-			p.inv[i] = cursor_stack
+			_put_slot(i, cursor_stack)
 			cursor_stack = s
 	elif event.button_index == MOUSE_BUTTON_RIGHT:
 		if cursor_stack == null and s:
@@ -1623,10 +1980,10 @@ func _slot_input(event: InputEvent, i: int) -> void:
 			cursor_stack = {"id": s["id"], "n": half}
 			s["n"] -= half
 			if s["n"] <= 0:
-				p.inv[i] = null
+				_put_slot(i, null)
 		elif cursor_stack:
 			if s == null:
-				p.inv[i] = {"id": cursor_stack["id"], "n": 1}
+				_put_slot(i, {"id": cursor_stack["id"], "n": 1})
 				cursor_stack["n"] -= 1
 			elif s["id"] == cursor_stack["id"] and s["n"] < B.stack_max(s["id"]):
 				s["n"] += 1
@@ -1635,9 +1992,49 @@ func _slot_input(event: InputEvent, i: int) -> void:
 				cursor_stack = null
 	else:
 		return
+	_slot_changed(i, s)
+
+
+## After a click changed slot `i` (which held `s`): taking a furnace's output counts as obtaining it.
+func _slot_changed(i: int, s) -> void:
+	if i == FURN_OUT and s:
+		main.player.note_obtained(s["id"])
 	Sfx.play("click", -10.0, randf_range(0.95, 1.1))
 	main.on_inventory_changed()
 	_slot_hover(i)
+
+
+## Remaining burn of the open furnace: the flame lights up from the bottom.
+func _draw_flame() -> void:
+	if furnace_idx < 0:
+		return
+	var fz: Dictionary = main.world.furnace_at(furnace_idx)
+	var frac: float = fz["burn"] / fz["burn_max"] if fz["burn_max"] > 0.0 else 0.0
+	var px := 3.0
+	var o := (furn_flame.size - Vector2(11, 12) * px) * 0.5
+	for y in 12:
+		for x in 11:
+			if FLAME[y][x] != "#":
+				continue
+			var c := Color(0.22, 0.23, 0.28)
+			if frac > 0.0 and 11 - y < frac * 12.0:
+				c = Color(1.0, 0.9, 0.35).lerp(Color(1.0, 0.35, 0.08), y / 11.0)
+			furn_flame.draw_rect(Rect2(o + Vector2(x, y) * px, Vector2(px, px)), c)
+
+
+## Smelting progress of the open furnace: the arrow fills left to right.
+func _draw_arrow() -> void:
+	if furnace_idx < 0:
+		return
+	var frac: float = main.world.furnace_at(furnace_idx)["prog"] / B.SMELT_TIME
+	var px := 4.0
+	var o := (furn_arrow.size - Vector2(16, 11) * px) * 0.5
+	for r in 11:
+		for x in 16:
+			if not ((x < 10 and r >= 4 and r <= 6) or (x >= 10 and x - 10 <= 5 - absi(r - 5))):
+				continue
+			var c := Color(1, 1, 1, 0.95) if x < frac * 16.0 else Color(0.22, 0.23, 0.28)
+			furn_arrow.draw_rect(Rect2(o + Vector2(x, r) * px, Vector2(px, px)), c)
 
 
 func _palette_input(event: InputEvent, id: int) -> void:
@@ -1667,12 +2064,12 @@ func refresh_crafting() -> void:
 		ch.queue_free()
 	var st: Dictionary = main.station_status()
 	craft_status.add_child(_chip("Crafting Table", st["table"]))
-	craft_status.add_child(_chip("Furnace", st["furnace"]))
-	craft_status.add_child(_chip("Fuel: %d" % main.player.fuel, main.player.fuel > 0))
 	var only: bool = craftable_only.button_pressed
 	var ready: Array = []
 	var locked: Array = []
 	for r in B.recipes:
+		if r["st"] == "furnace":
+			continue
 		var ok: bool = main.can_craft(r, st)
 		if ok:
 			ready.append(r)
@@ -1742,7 +2139,7 @@ func _recipe_row(r: Dictionary, ok: bool) -> Control:
 		tag.get_theme_stylebox("panel").content_margin_left = 6
 		tag.get_theme_stylebox("panel").content_margin_right = 6
 		tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		tag.add_child(_label("TABLE" if r["st"] == "table" else "FURNACE", 11, MUTED, 0, font_x))
+		tag.add_child(_label("TABLE", 11, MUTED, 0, font_x))
 		tag.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		name_row.add_child(tag)
 	var ing := HBoxContainer.new()
