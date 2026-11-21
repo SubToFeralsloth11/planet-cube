@@ -1,0 +1,1072 @@
+extends Node3D
+## Game orchestration: states, day/night, spawning, missions, crafting, boss fight, saving.
+
+const SAVE_PATH := "user://planet_cube.save"
+const DAY_LEN := 540.0
+const WorldScript := preload("res://scripts/world.gd")
+const PlayerScript := preload("res://scripts/player.gd")
+const UIScript := preload("res://scripts/ui.gd")
+const MobScript := preload("res://scripts/mob.gd")
+const BossScript := preload("res://scripts/boss.gd")
+const BoltScript := preload("res://scripts/bolt.gd")
+const TntScript := preload("res://scripts/tnt.gd")
+const RocketScript := preload("res://scripts/rocket.gd")
+const CENTER := Vector3(64, 64, 64)
+
+var world
+var player
+var ui
+var env: Environment
+var sky_mat: ShaderMaterial
+var sun: DirectionalLight3D
+var title_cam: Camera3D
+var map_cam: Camera3D
+var cine_cam: Camera3D
+var map_beam: MeshInstance3D
+var state := "boot"
+var time_of_day := 0.9
+var sun_dir := Vector3.UP
+var entities: Array = []
+var boss = null
+var rocket = null
+var boss_defeated := false
+var escaped := false
+var objective := 0
+var orbit_a := 0.0
+var spawn_t := 0.0
+var obj_t := 0.0
+var save_t := 0.0
+var cine_t := 0.0
+var danger := 0.0
+var map_view := false
+var world_fresh := true
+var clouds: Array = []
+var cloud_mat: StandardMaterial3D
+var part_mesh: BoxMesh
+var burst_mesh: BoxMesh
+var objectives: Array = []
+
+
+func _ready() -> void:
+	randomize()
+	_setup_input()
+	_setup_env()
+	world = WorldScript.new()
+	add_child(world)
+	world.tnt_lit.connect(func(p): spawn_tnt(p, 0.6 + randf() * 0.5))
+	player = PlayerScript.new()
+	add_child(player)
+	player.setup(self, world)
+	ui = UIScript.new()
+	add_child(ui)
+	ui.setup(self)
+	title_cam = Camera3D.new()
+	title_cam.far = 2000.0
+	title_cam.fov = 55.0
+	add_child(title_cam)
+	map_cam = Camera3D.new()
+	map_cam.far = 2000.0
+	map_cam.fov = 50.0
+	add_child(map_cam)
+	cine_cam = Camera3D.new()
+	cine_cam.far = 3000.0
+	add_child(cine_cam)
+	map_beam = MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = 0.9
+	cm.bottom_radius = 0.9
+	cm.height = 40.0
+	map_beam.mesh = cm
+	var bm := StandardMaterial3D.new()
+	bm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bm.albedo_color = Color(0.3, 1.0, 1.0)
+	map_beam.material_override = bm
+	map_beam.visible = false
+	add_child(map_beam)
+	part_mesh = BoxMesh.new()
+	part_mesh.size = Vector3(0.13, 0.13, 0.13)
+	var pm := StandardMaterial3D.new()
+	pm.vertex_color_use_as_albedo = true
+	pm.roughness = 1.0
+	part_mesh.material = pm
+	burst_mesh = BoxMesh.new()
+	burst_mesh.size = Vector3(0.2, 0.2, 0.2)
+	var bmat := StandardMaterial3D.new()
+	bmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bmat.vertex_color_use_as_albedo = true
+	burst_mesh.material = bmat
+	_build_clouds()
+	_define_objectives()
+	get_viewport().size_changed.connect(_fit_render_scale)
+	_fit_render_scale()
+	_boot()
+
+
+## Keeps the 3D render around 2400 px wide so Retina/4K windows stay smooth; UI stays full resolution.
+func _fit_render_scale() -> void:
+	var px := float(get_window().size.x)
+	get_viewport().scaling_3d_scale = clampf(2400.0 / maxf(px, 1.0), 0.5, 1.0)
+
+
+func _setup_input() -> void:
+	var binds := {
+		"move_forward": [KEY_W, KEY_UP], "move_back": [KEY_S, KEY_DOWN], "move_left": [KEY_A, KEY_LEFT],
+		"move_right": [KEY_D, KEY_RIGHT], "jump": [KEY_SPACE], "sprint": [KEY_SHIFT], "descend": [KEY_CTRL, KEY_C],
+	}
+	for action in binds:
+		if not InputMap.has_action(action):
+			InputMap.add_action(action)
+		for k in binds[action]:
+			var ev := InputEventKey.new()
+			ev.physical_keycode = k
+			InputMap.action_add_event(action, ev)
+
+
+func _setup_env() -> void:
+	env = Environment.new()
+	env.background_mode = Environment.BG_SKY
+	var sky := Sky.new()
+	sky_mat = ShaderMaterial.new()
+	sky_mat.shader = load("res://shaders/sky.gdshader")
+	sky.sky_material = sky_mat
+	sky.radiance_size = Sky.RADIANCE_SIZE_64
+	env.sky = sky
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	env.tonemap_exposure = 1.05
+	env.glow_enabled = true
+	env.glow_intensity = 0.75
+	env.glow_strength = 1.0
+	env.glow_hdr_threshold = 1.0
+	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SOFTLIGHT
+	env.fog_enabled = true
+	env.fog_density = 0.004
+	env.fog_sky_affect = 0.0
+	env.adjustment_enabled = true
+	env.adjustment_saturation = 1.18
+	env.adjustment_contrast = 1.05
+	var we := WorldEnvironment.new()
+	we.environment = env
+	add_child(we)
+	sun = DirectionalLight3D.new()
+	sun.shadow_enabled = true
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	sun.directional_shadow_max_distance = 70.0
+	sun.shadow_blur = 1.2
+	sun.light_color = Color(1.0, 0.95, 0.86)
+	sun.light_energy = 1.3
+	add_child(sun)
+
+
+func _build_clouds() -> void:
+	cloud_mat = StandardMaterial3D.new()
+	cloud_mat.albedo_color = Color(1, 1, 1, 0.55)
+	cloud_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	cloud_mat.roughness = 1.0
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 4242
+	for f in 6:
+		var vb := VBody.new(null)
+		vb.set_face(f)
+		for k in 9:
+			var mi := MeshInstance3D.new()
+			var bm := BoxMesh.new()
+			bm.size = Vector3(rng.randf_range(6, 12), 0.8, rng.randf_range(4, 9))
+			mi.mesh = bm
+			mi.material_override = cloud_mat
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			add_child(mi)
+			mi.global_basis = vb.frame
+			clouds.append({"node": mi, "f": f, "u": rng.randf_range(-48, 48), "v": rng.randf_range(-46, 46), "frame": vb.frame, "alt": rng.randf_range(57, 60)})
+
+
+func _define_objectives() -> void:
+	objectives = [
+		["Punch a tree", "Hold Left Mouse on a tree trunk to collect logs.", func(): return _has_any([B.LOG, B.BIRCH_LOG, B.SPRUCE_LOG])],
+		["Craft planks", "Press E to open crafting, then click Planks.", func(): return _has_any([B.PLANKS, B.SPRUCE_PLANKS, B.BIRCH_PLANKS])],
+		["Build a Crafting Table", "Craft it, then place it with Right Mouse.", func(): return _has_any([B.CRAFTING_TABLE])],
+		["Craft a Wooden Pickaxe", "Stand near your table. Make sticks first.", func(): return _has_any([B.WOOD_PICK, B.STONE_PICK, B.IRON_PICK, B.DIAMOND_PICK])],
+		["Mine some stone", "Dig down through the dirt - stone needs a pickaxe.", func(): return _has_any([B.COBBLE])],
+		["Craft a Stone Pickaxe", "Stone tools dig much faster.", func(): return _has_any([B.STONE_PICK, B.IRON_PICK, B.DIAMOND_PICK])],
+		["Find coal and craft torches", "Coal ore is speckled black. Torches light caves and keep monsters away.", func(): return _has_any([B.TORCH])],
+		["Build a Furnace", "8 cobblestone at a crafting table.", func(): return _has_any([B.FURNACE])],
+		["Smelt iron", "Iron ore has peach specks (needs a stone pickaxe). Smelt it next to a furnace.", func(): return _has_any([B.IRON_INGOT])],
+		["Craft an Iron Pickaxe", "Iron can mine gold and diamonds.", func(): return _has_any([B.IRON_PICK, B.DIAMOND_PICK])],
+		["Dig deep for diamonds", "Diamonds hide deep inside the planet - and under the Ashlands.", func(): return _has_any([B.DIAMOND])],
+		["Craft a Diamond Pickaxe", "Only diamond can crack the glowing Core Rock.", func(): return _has_any([B.DIAMOND_PICK])],
+		["Reach the core: mine Starcore", "Dig toward the planet's center. Beware the lava layer!", func(): return _has_any([B.STARCORE])],
+		["Build the Rocket", "Hull + Engine + 3 Fuel Cells + Navigation Core, at a table.", func(): return _has_any([B.ROCKET]) or rocket != null or boss_defeated],
+		["Launch: defeat the Core Sentinel", "Place the rocket on open ground and right-click it.", func(): return boss_defeated],
+		["ESCAPE THE PLANET!", "Right-click the rocket to launch!", func(): return escaped],
+	]
+
+
+func _has_any(ids: Array) -> bool:
+	for id in ids:
+		if player.obtained.has(id):
+			return true
+	return false
+
+
+# ---------------- boot / game flow ----------------
+
+func _progress(f: float, text: String) -> void:
+	ui.set_loading(f, text)
+
+
+func _boot() -> void:
+	ui.show_screen("loading")
+	var data := _read_save()
+	if data.is_empty():
+		await _load_world(randi() % 1000000, {})
+	else:
+		await _load_world(data["seed"], data["edits"])
+	_enter_title()
+
+
+func _load_world(seed_val: int, edits: Dictionary) -> void:
+	state = "loading"
+	ui.show_screen("loading")
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_clear_entities()
+	await world.generate(seed_val, _progress)
+	world.edits = edits.duplicate()
+	world.apply_edits()
+	await world.finish_build(_progress)
+	world_fresh = edits.is_empty()
+
+
+func _enter_title() -> void:
+	state = "title"
+	title_cam.current = true
+	ui.show_screen("title")
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func has_save() -> bool:
+	return FileAccess.file_exists(SAVE_PATH)
+
+
+func _read_save() -> Dictionary:
+	if not has_save():
+		return {}
+	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	if f == null:
+		return {}
+	var d = f.get_var()
+	return d if d is Dictionary else {}
+
+
+func start_game(mode: String) -> void:
+	if mode == "continue":
+		var data := _read_save()
+		if data.is_empty():
+			return
+		if data["seed"] != world.world_seed:
+			await _load_world(data["seed"], data["edits"])
+		player.from_dict(data["player"])
+		time_of_day = data.get("time", 0.9)
+		objective = data.get("objective", 0)
+		boss_defeated = data.get("boss_defeated", false)
+		escaped = data.get("escaped", false)
+		var rd = data.get("rocket", null)
+		if rd:
+			_spawn_rocket(rd["face"], rd["pos"])
+			if boss_defeated:
+				rocket.state = "ready"
+	else:
+		if not world_fresh or has_save():
+			await _load_world(randi() % 1000000, {})
+		player.inv.clear()
+		player.inv.resize(player.SLOTS)
+		player.obtained = {}
+		player.stats = {"mined": 0, "placed": 0, "kills": 0, "deaths": 0, "time": 0.0}
+		player.creative = mode == "creative"
+		player.health = player.max_health
+		player.fuel = 0
+		player.yaw = 0.0
+		player.pitch = -0.1
+		player.body.flying = false
+		var sp: Vector3 = world.find_spawn()
+		player.spawn_pos = sp
+		player.spawn_face = 2
+		player.spawn_at(sp, 2)
+		time_of_day = 0.92
+		objective = 0
+		boss_defeated = false
+		escaped = false
+		if player.creative:
+			for id in [B.GRASS, B.STONE_BRICKS, B.PLANKS, B.GLASS, B.TORCH, B.LAMP, B.TNT, B.DIAMOND_SWORD, B.DIAMOND_PICK]:
+				player.add_item(id, B.stack_max(id))
+		world_fresh = false
+		save_game()
+	player.dead = false
+	player.camera_current()
+	_update_objective_ui()
+	ui.refresh_hotbar()
+	_resume_play()
+	ui.toast("Welcome to Planet Cube! Walk off any edge - gravity follows you.", 5.0)
+
+
+func _resume_play() -> void:
+	state = "play"
+	ui.show_screen("")
+	player.cam.current = true
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func resume() -> void:
+	_resume_play()
+
+
+func save_and_title() -> void:
+	save_game()
+	_clear_entities()
+	rocket = null
+	boss = null
+	player.cam.current = false
+	_enter_title()
+
+
+func quit_game() -> void:
+	if state != "title" and state != "loading" and state != "boot":
+		save_game()
+	get_tree().quit()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		if state in ["play", "pause", "inventory", "dead", "confirm", "end"]:
+			save_game()
+
+
+func save_game() -> void:
+	if world.world_seed == 0 and world.blocks.is_empty():
+		return
+	var d := {
+		"version": 1, "seed": world.world_seed, "edits": world.edits, "player": player.to_dict(),
+		"time": time_of_day, "objective": objective, "boss_defeated": boss_defeated, "escaped": escaped,
+		"rocket": {"face": rocket.face, "pos": rocket.base} if (rocket and is_instance_valid(rocket) and rocket.state != "launching") else null,
+	}
+	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if f:
+		f.store_var(d)
+
+
+func is_playing() -> bool:
+	return state == "play"
+
+
+# ---------------- input ----------------
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		match event.keycode:
+			KEY_ESCAPE:
+				if state == "play":
+					state = "pause"
+					ui.show_screen("pause")
+					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+					save_game()
+				elif state == "pause":
+					_resume_play()
+				elif state == "inventory":
+					close_inventory()
+				elif state == "confirm":
+					close_confirm()
+			KEY_E, KEY_TAB:
+				if state == "play":
+					open_inventory()
+				elif state == "inventory":
+					close_inventory()
+			KEY_M:
+				if state == "play":
+					map_view = true
+			KEY_F2:
+				_screenshot()
+	elif event is InputEventKey and not event.pressed and event.keycode == KEY_M:
+		map_view = false
+	elif event is InputEventMouseButton and event.pressed and state == "play" and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _screenshot() -> void:
+	var img := get_viewport().get_texture().get_image()
+	var path := "user://shot_%d.png" % Time.get_ticks_msec()
+	img.save_png(path)
+	ui.toast("Screenshot saved")
+
+
+func open_inventory() -> void:
+	state = "inventory"
+	ui.show_screen("inventory")
+	ui.open_inventory()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func close_inventory() -> void:
+	ui.close_inventory()
+	_resume_play()
+
+
+func close_confirm() -> void:
+	_resume_play()
+
+
+# ---------------- main loop ----------------
+
+func _process(dt: float) -> void:
+	dt = minf(dt, 0.05)
+	time_of_day = fmod(time_of_day + dt / DAY_LEN, 1.0)
+	var ang := time_of_day * TAU
+	var axis := Vector3(1, 1, 1).normalized()
+	var p0 := Vector3(-1, 2, -1).normalized()
+	var q0 := axis.cross(p0)
+	sun_dir = (p0 * cos(ang) + q0 * sin(ang)).normalized()
+	match state:
+		"title":
+			orbit_a += dt * 0.08
+			var pos := CENTER + Vector3(cos(orbit_a) * 150.0, 85.0 + sin(orbit_a * 0.7) * 30.0, sin(orbit_a) * 150.0)
+			title_cam.global_position = pos
+			title_cam.look_at(CENTER + Vector3(0, 8, 0), Vector3.UP)
+			world.light_anchor = CENTER
+			_update_sky(dt, Vector3.UP, 0.2, false)
+		"play":
+			player.tick(dt)
+			_tick_entities(dt)
+			_spawning(dt)
+			obj_t -= dt
+			if obj_t <= 0.0:
+				obj_t = 0.4
+				_check_objectives()
+			save_t += dt
+			if save_t > 60.0:
+				save_t = 0.0
+				save_game()
+			_update_cameras(dt)
+			_update_sky(dt, Basis(player.vis_q).y, -1.0, not map_view)
+			ui.update_hud(dt)
+			_update_info()
+		"dead":
+			player.tick(dt)
+			_tick_entities(dt)
+			_update_sky(dt, Basis(player.vis_q).y, -1.0, true)
+			ui.update_hud(dt)
+		"inventory", "pause", "confirm":
+			_update_sky(dt, Basis(player.vis_q).y, -1.0, true)
+			ui.update_hud(dt)
+		"cinematic":
+			_tick_entities(dt)
+			_cinematic(dt)
+		"end":
+			_tick_entities(dt)
+			_update_sky(dt, Vector3(0, 1, 0), 0.25, false)
+	_update_clouds(dt)
+
+
+func _update_cameras(_dt: float) -> void:
+	if map_view:
+		var up: Vector3 = Basis(player.vis_q).y
+		var side: Vector3 = Basis(player.vis_q).z
+		map_cam.global_position = CENTER + up * 150.0 + side * 70.0
+		map_cam.look_at(CENTER, up)
+		map_cam.current = true
+		map_beam.visible = true
+		map_beam.global_basis = Basis(player.vis_q)
+		map_beam.global_position = player.body.pos + up * 20.0
+		world.light_anchor = player.body.pos
+	else:
+		map_beam.visible = false
+		if not player.cam.current:
+			player.cam.current = true
+		world.light_anchor = player.cam.global_position
+
+
+func _update_sky(dt: float, up: Vector3, forced_day: float, fog: bool) -> void:
+	var d := smoothstep(-0.22, 0.3, up.dot(sun_dir))
+	if forced_day >= 0.0:
+		d = forced_day
+	var target_danger := 1.0 if (boss != null and is_instance_valid(boss) and not boss.dead) else 0.0
+	danger = move_toward(danger, target_danger, dt * 0.5)
+	sky_mat.set_shader_parameter("sun_dir", sun_dir)
+	sky_mat.set_shader_parameter("up_dir", up)
+	sky_mat.set_shader_parameter("day", d)
+	sky_mat.set_shader_parameter("danger", danger)
+	var su := up.dot(sun_dir) if forced_day < 0.0 else 1.0
+	var light_dir := sun_dir
+	var sunset := clampf(1.0 - absf(up.dot(sun_dir)) * 2.5, 0.0, 1.0) * d
+	if su >= 0.0:
+		sun.light_energy = 1.35 * smoothstep(-0.08, 0.2, su)
+		sun.light_color = Color(1.0, 0.95, 0.86).lerp(Color(1.0, 0.6, 0.35), sunset)
+	else:
+		light_dir = -sun_dir
+		sun.light_energy = 0.42 * smoothstep(0.0, 0.25, -su)
+		sun.light_color = Color(0.55, 0.65, 1.0)
+	sun.visible = sun.light_energy > 0.01
+	var hint := Vector3.UP if absf(light_dir.dot(Vector3.UP)) < 0.95 else Vector3.RIGHT
+	sun.global_basis = Basis.looking_at(-light_dir, hint)
+	var amb_day := Color(0.6, 0.66, 0.78)
+	var amb_night := Color(0.22, 0.27, 0.48)
+	env.ambient_light_color = amb_night.lerp(amb_day, d).lerp(Color(1.0, 0.45, 0.35), danger * 0.35)
+	env.ambient_light_energy = lerpf(0.65, 0.85, d)
+	var hor := Color(0.03, 0.05, 0.11).lerp(Color(0.62, 0.78, 0.95), d)
+	env.fog_light_color = hor.lerp(Color(1.0, 0.55, 0.3), sunset * 0.4)
+	env.fog_enabled = fog
+	if fog and world.block_at(player.eye_pos()) == B.WATER:
+		env.fog_density = 0.09
+		env.fog_light_color = Color(0.1, 0.25, 0.55)
+	else:
+		env.fog_density = 0.0045
+
+
+func _update_clouds(dt: float) -> void:
+	for c in clouds:
+		c["u"] += dt * 1.2
+		if c["u"] > 50.0:
+			c["u"] = -50.0
+		var fr: Basis = c["frame"]
+		var n: MeshInstance3D = c["node"]
+		n.global_position = CENTER + fr.y * c["alt"] + fr.x * c["u"] + fr.z * c["v"]
+		n.visible = not map_view
+
+
+func daylight(face: int) -> float:
+	var up: Vector3 = VBody.UPS[face]
+	return smoothstep(-0.22, 0.3, up.dot(sun_dir))
+
+
+func _update_info() -> void:
+	var f: int = player.body.face
+	var biome: String = world.BIOME_NAMES[world.FACE_BIOME[f]]
+	var d := daylight(f)
+	var tod := "Day" if d > 0.7 else ("Night" if d < 0.2 else "Dusk")
+	var c: Vector3 = player.body.center() - CENTER
+	var alt := int(maxf(maxf(absf(c.x), absf(c.y)), absf(c.z)))
+	var depth_txt := "Altitude %d" % alt
+	if alt < world.R:
+		depth_txt = "Depth %d to the core" % alt
+	var mode := "  ·  CREATIVE" if player.creative else ""
+	ui.info_label.text = "%s Face  ·  %s\n%s%s" % [biome, tod, depth_txt, mode]
+
+
+# ---------------- entities ----------------
+
+func _clear_entities() -> void:
+	for e in entities:
+		if is_instance_valid(e):
+			e.queue_free()
+	entities.clear()
+	boss = null
+	rocket = null
+
+
+func _tick_entities(dt: float) -> void:
+	for e in entities.duplicate():
+		if is_instance_valid(e) and not e.dead:
+			e.tick(dt, player)
+
+
+func remove_entity(e) -> void:
+	entities.erase(e)
+	if is_instance_valid(e):
+		e.queue_free()
+
+
+func pick_entity(o: Vector3, d: Vector3, maxd: float):
+	var best = null
+	var bd := maxd
+	for e in entities:
+		if not is_instance_valid(e) or e.dead:
+			continue
+		var t: float = e.hit_test(o, d)
+		if t >= 0.0 and t <= bd:
+			bd = t
+			best = e
+	return best
+
+
+func entity_blocks(bb: AABB) -> bool:
+	for e in entities:
+		if is_instance_valid(e) and not e.dead and e.blocks(bb):
+			return true
+	return false
+
+
+func _count_mobs() -> Vector2i:
+	var passive := 0
+	var hostile := 0
+	for e in entities:
+		if e is MobScript:
+			if e.hostile:
+				hostile += 1
+			else:
+				passive += 1
+	return Vector2i(passive, hostile)
+
+
+func _spawning(dt: float) -> void:
+	spawn_t -= dt
+	if spawn_t > 0.0:
+		return
+	spawn_t = 1.0
+	for e in entities.duplicate():
+		if e is MobScript and not e.minion and e.global_position.distance_to(player.body.pos) > 72.0:
+			remove_entity(e)
+	var counts := _count_mobs()
+	var fr: Basis = player.body.frame
+	var up: Vector3 = player.body.up()
+	var a := randf() * TAU
+	var dist := randf_range(14.0, 30.0)
+	var underground: bool = world.sky_vis_at(player.body.center()) < 0.5
+	var feet := Vector3.INF
+	if underground:
+		var rp: Vector3 = player.body.pos + (fr.x * cos(a) + fr.z * sin(a)) * randf_range(8.0, 18.0) + up * randf_range(-6.0, 6.0)
+		feet = _find_cave_floor(rp, up)
+	else:
+		feet = world.surface_at(player.body.pos + (fr.x * cos(a) + fr.z * sin(a)) * dist + up * 12.0)
+	if feet == Vector3.INF:
+		return
+	var face: int = world.face_of_pos(feet + up * 0.5)
+	var fup: Vector3 = VBody.UPS[face]
+	var dark: bool = daylight(face) < 0.3 or world.sky_vis_at(feet + fup * 0.5) < 0.3
+	if dark:
+		if player.creative or counts.y >= 7 or _near_light(feet, 9.0):
+			return
+		if feet.distance_to(player.body.pos) < 10.0:
+			return
+		spawn_mob("zombie" if randf() < 0.68 else "boomer", feet, face)
+	else:
+		if counts.x >= 8:
+			return
+		var ground: int = world.block_at(feet - fup * 0.5)
+		if ground != B.GRASS and ground != B.SNOW:
+			return
+		var biome: int = world.FACE_BIOME[face]
+		var kinds := ["pig", "cow", "sheep"]
+		if biome == world.TUNDRA:
+			kinds = ["sheep", "sheep", "cow"]
+		var k: String = kinds[randi() % kinds.size()]
+		var n := randi_range(1, 3)
+		for i in n:
+			spawn_mob(k, feet + (fr.x * randf_range(-1.5, 1.5) + fr.z * randf_range(-1.5, 1.5)) + fup * 0.2, face)
+
+
+func _find_cave_floor(p: Vector3, up: Vector3) -> Vector3:
+	var q := p
+	for i in 14:
+		var b: int = world.block_at(q)
+		var below: int = world.block_at(q - up)
+		var head: int = world.block_at(q + up)
+		if B.SOLID[b] == 0 and b != B.WATER and b != B.LAVA and B.SOLID[head] == 0 and B.SOLID[below] == 1:
+			var c := Vector3(floorf(q.x) + 0.5, floorf(q.y) + 0.5, floorf(q.z) + 0.5)
+			return c - up * 0.5
+		q -= up
+	return Vector3.INF
+
+
+func _near_light(p: Vector3, r: float) -> bool:
+	var r2 := r * r
+	for l in world.light_nodes.values():
+		if l.position.distance_squared_to(p) < r2:
+			return true
+	return false
+
+
+func spawn_mob(kind: String, feet: Vector3, face: int):
+	var m := MobScript.new()
+	add_child(m)
+	m.setup(self, world, kind, feet, face)
+	entities.append(m)
+	return m
+
+
+func summon_minions(pos: Vector3, face: int) -> void:
+	var fr := VBody.new(null)
+	fr.set_face(face)
+	var up: Vector3 = VBody.UPS[face]
+	for i in 3:
+		var a := randf() * TAU
+		var p: Vector3 = world.surface_at(pos + (fr.frame.x * cos(a) + fr.frame.z * sin(a)) * randf_range(6, 10) + up * 10.0)
+		if p != Vector3.INF:
+			var m = spawn_mob("boomer" if i == 2 else "zombie", p, face)
+			m.minion = true
+			spawn_burst(p + up, Color(1.0, 0.4, 0.2), 16)
+	ui.toast("The Sentinel summons its minions!")
+
+
+func spawn_tnt(pos: Vector3, fuse := 3.0) -> void:
+	var t := TntScript.new()
+	add_child(t)
+	t.setup(self, world, pos, fuse)
+	entities.append(t)
+
+
+func spawn_bolt(pos: Vector3, vel: Vector3) -> void:
+	var b := BoltScript.new()
+	add_child(b)
+	b.setup(self, world, pos, vel)
+	entities.append(b)
+
+
+func shake_camera(a: float) -> void:
+	player.shake = maxf(player.shake, a)
+
+
+func explode(pos: Vector3, radius: float, dmg: float, no_terrain_near_rocket := false) -> void:
+	var protect: bool = rocket != null and is_instance_valid(rocket) and pos.distance_to(rocket.base) < radius + 4.0
+	if radius > 0.0 and not protect:
+		world.explode(pos, radius)
+	var reach := maxf(radius * 2.2, 3.0)
+	if dmg > 0.0:
+		var d: float = player.body.center().distance_to(pos)
+		if d < reach:
+			var k := 1.0 - d / reach
+			player.hurt(dmg * k, (player.body.center() - pos).normalized() * 12.0 * k + player.body.up() * 5.0 * k, "explosion")
+		for e in entities.duplicate():
+			if e is MobScript and is_instance_valid(e) and not e.dead:
+				var dm: float = e.body.center().distance_to(pos)
+				if dm < reach:
+					e.hurt(dmg * (1.0 - dm / reach), (e.body.center() - pos).normalized(), null)
+	spawn_burst(pos, Color(1.0, 0.6, 0.2), int(18 + radius * 8), 1.0 + radius * 0.25)
+	spawn_burst(pos, Color(0.35, 0.33, 0.32), int(10 + radius * 5), 0.6 + radius * 0.2)
+	Sfx.play3d("explode", pos, 4.0 + radius, randf_range(0.85, 1.1))
+	var pd: float = player.body.center().distance_to(pos)
+	shake_camera(clampf(1.2 - pd / 25.0, 0.0, 1.0) * minf(1.0, radius / 3.0))
+
+
+func spawn_particles(pos: Vector3, block_id: int, count: int, up: Vector3, col = null) -> void:
+	var p := CPUParticles3D.new()
+	p.one_shot = true
+	p.amount = count
+	p.lifetime = 0.9
+	p.explosiveness = 1.0
+	p.mesh = part_mesh
+	p.direction = up
+	p.spread = 70.0
+	p.initial_velocity_min = 2.0
+	p.initial_velocity_max = 4.5
+	p.gravity = -up * 16.0
+	p.scale_amount_min = 0.6
+	p.scale_amount_max = 1.2
+	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	p.emission_box_extents = Vector3(0.3, 0.3, 0.3)
+	p.color = col if col != null else T.block_color.get(block_id, Color(0.6, 0.6, 0.6))
+	add_child(p)
+	p.global_position = pos
+	p.emitting = true
+	get_tree().create_timer(1.2).timeout.connect(p.queue_free)
+
+
+func spawn_burst(pos: Vector3, col: Color, count: int, size := 1.0) -> void:
+	var p := CPUParticles3D.new()
+	p.one_shot = true
+	p.amount = maxi(count, 1)
+	p.lifetime = 0.7
+	p.explosiveness = 0.95
+	p.mesh = burst_mesh
+	p.direction = Vector3.UP
+	p.spread = 180.0
+	p.initial_velocity_min = 3.0 * size
+	p.initial_velocity_max = 8.0 * size
+	p.damping_min = 4.0
+	p.damping_max = 8.0
+	p.gravity = Vector3.ZERO
+	p.scale_amount_min = 0.8 * size
+	p.scale_amount_max = 2.0 * size
+	var curve := Curve.new()
+	curve.add_point(Vector2(0, 1))
+	curve.add_point(Vector2(1, 0))
+	p.scale_amount_curve = curve
+	p.color = col
+	add_child(p)
+	p.global_position = pos
+	p.emitting = true
+	get_tree().create_timer(1.0).timeout.connect(p.queue_free)
+
+
+# ---------------- callbacks ----------------
+
+func on_inventory_changed() -> void:
+	ui.refresh_hotbar()
+	if state == "inventory":
+		ui.refresh_inventory()
+		ui.refresh_crafting()
+
+
+func on_block_broken(_b: int) -> void:
+	pass
+
+
+func on_block_placed(_b: int) -> void:
+	pass
+
+
+func on_face_changed(face: int) -> void:
+	var biome: String = world.BIOME_NAMES[world.FACE_BIOME[face]]
+	if world.sky_vis_at(player.body.center()) > 0.5:
+		ui.toast("~ %s Face ~" % biome, 2.5)
+		Sfx.play("whoosh", -6.0)
+
+
+func on_mob_killed(_m, by_player: bool) -> void:
+	if by_player:
+		player.stats["kills"] += 1
+
+
+func on_player_died(cause: String) -> void:
+	state = "dead"
+	var msgs := {
+		"fall": "You fell from a great height.", "lava": "You tried to swim in lava.", "zombie": "A zombie got you.",
+		"explosion": "You were blown up.", "shockwave": "Crushed by the Sentinel's shockwave.", "magma": "The floor was lava. Sort of.",
+		"cactus": "Hugged a cactus.",
+	}
+	ui.death_label.text = msgs.get(cause, "You died.")
+	ui.show_screen("death")
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+func respawn() -> void:
+	player.respawn()
+	_resume_play()
+
+
+func _check_objectives() -> void:
+	var advanced := false
+	for j in range(objectives.size() - 1, objective - 1, -1):
+		if objectives[j][2].call():
+			objective = j + 1
+			advanced = true
+			break
+	if advanced:
+		Sfx.play("objective", -3.0)
+		if objective < objectives.size():
+			ui.toast("Mission complete!  Next: " + objectives[objective][0], 4.0)
+		_update_objective_ui()
+
+
+func _update_objective_ui() -> void:
+	if objective >= objectives.size():
+		ui.set_objective(objectives.size() - 1, objectives.size(), "All missions complete!", "Planet Cube is yours. Build anything you can imagine.")
+	else:
+		var o: Array = objectives[objective]
+		ui.set_objective(objective, objectives.size(), o[0], o[1])
+
+
+# ---------------- crafting ----------------
+
+func station_status() -> Dictionary:
+	var out := {"table": false, "furnace": false}
+	var c: Vector3 = player.body.center()
+	var cx := floori(c.x)
+	var cy := floori(c.y)
+	var cz := floori(c.z)
+	for z in range(cz - 4, cz + 5):
+		for y in range(cy - 4, cy + 5):
+			for x in range(cx - 4, cx + 5):
+				var b: int = world.get_b(x, y, z)
+				if b == B.CRAFTING_TABLE:
+					out["table"] = true
+				elif b == B.FURNACE:
+					out["furnace"] = true
+	return out
+
+
+func _has_fuel() -> bool:
+	return player.fuel > 0 or player.count(B.COAL) > 0 or player.count(B.G_LOG) > 0 or player.count(B.G_PLANKS) > 0
+
+
+func can_craft(r: Dictionary, st = null) -> bool:
+	if player.creative:
+		return true
+	if st == null:
+		st = station_status()
+	if r["st"] == "table" and not st["table"]:
+		return false
+	if r["st"] == "furnace" and (not st["furnace"] or not _has_fuel()):
+		return false
+	for id in r["in"]:
+		if player.count(id) < r["in"][id]:
+			return false
+	return true
+
+
+func craft(r: Dictionary) -> bool:
+	var st := station_status()
+	if not can_craft(r, st):
+		if r["st"] == "table" and not st["table"]:
+			ui.toast("You need to be near a Crafting Table.")
+		elif r["st"] == "furnace" and not st["furnace"]:
+			ui.toast("You need to be near a Furnace.")
+		elif r["st"] == "furnace" and not _has_fuel():
+			ui.toast("The furnace needs fuel: coal, logs or planks.")
+		else:
+			ui.toast("Missing ingredients.")
+		Sfx.play("click", -4.0, 0.6)
+		return false
+	if not player.creative:
+		if r["st"] == "furnace":
+			if player.fuel <= 0:
+				if player.count(B.COAL) > 0:
+					player.remove(B.COAL, 1)
+					player.fuel += 8
+				elif player.count(B.G_LOG) > 0:
+					player.remove(B.G_LOG, 1)
+					player.fuel += 3
+				else:
+					player.remove(B.G_PLANKS, 1)
+					player.fuel += 1
+			player.fuel -= 1
+		for id in r["in"]:
+			player.remove(id, r["in"][id])
+	var left: int = player.add_item(r["out"], r["n"])
+	if left > 0:
+		ui.toast("Inventory full!")
+	Sfx.play("craft", -4.0, randf_range(0.95, 1.08))
+	_check_objectives()
+	return true
+
+
+# ---------------- rocket & boss ----------------
+
+func _spawn_rocket(face: int, base: Vector3) -> void:
+	rocket = RocketScript.new()
+	add_child(rocket)
+	rocket.setup(self, face, base)
+	entities.append(rocket)
+
+
+func try_place_rocket(hit: Dictionary, p) -> void:
+	if rocket != null and is_instance_valid(rocket):
+		ui.toast("You already placed your rocket.")
+		return
+	var up: Vector3 = p.body.up()
+	var n: Vector3i = hit["normal"]
+	if Vector3(n) != up:
+		ui.toast("Place the rocket on top of flat ground.")
+		return
+	var cell: Vector3i = hit["pos"] + n
+	var fr := VBody.new(null)
+	fr.set_face(p.body.face)
+	for k in 8:
+		for i in range(-1, 2):
+			for j in range(-1, 2):
+				var c := Vector3(cell) + Vector3(0.5, 0.5, 0.5) + up * k + fr.frame.x * i + fr.frame.z * j
+				if B.SOLID[world.block_at(c)] == 1:
+					ui.toast("The rocket needs a clear 3x3 space and 8 blocks of sky above.")
+					return
+	if world.sky_vis_at(Vector3(cell) + Vector3(0.5, 0.5, 0.5) + up * 8.0) < 0.99:
+		ui.toast("The rocket must be under open sky.")
+		return
+	var base := Vector3(cell) + Vector3(0.5, 0.5, 0.5) - up * 0.5
+	_spawn_rocket(p.body.face, base)
+	p.consume_held()
+	Sfx.play("place", 0.0)
+	Sfx.play("objective", -6.0, 0.7)
+	ui.toast("Rocket placed! Right-click it to begin the launch sequence.", 5.0)
+
+
+func rocket_interact() -> void:
+	if rocket == null:
+		return
+	if boss != null and is_instance_valid(boss) and not boss.dead:
+		ui.toast("The Sentinel's gravity lock holds the rocket! Destroy it!")
+		return
+	if rocket.state == "launching":
+		return
+	state = "confirm"
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if boss_defeated:
+		ui.ask("All systems green.\nLaunch the rocket and leave Planet Cube forever?", _launch)
+	else:
+		ui.ask("BEGIN LAUNCH SEQUENCE?\n\nThe planet's guardian will awaken to stop you.\nBring a good sword, food and blocks to build with!", _start_boss)
+	ui.show_screen("confirm")
+
+
+func _start_boss() -> void:
+	rocket.state = "armed"
+	var up: Vector3 = VBody.UPS[rocket.face]
+	var fr := VBody.new(null)
+	fr.set_face(rocket.face)
+	var sp: Vector3 = world.surface_at(rocket.base + fr.frame.x * 3.0 + up * 6.0)
+	if sp != Vector3.INF:
+		player.spawn_pos = sp
+		player.spawn_face = rocket.face
+	boss = BossScript.new()
+	add_child(boss)
+	boss.setup(self, world, rocket.base, rocket.face, player.body.pos)
+	entities.append(boss)
+	Sfx.play("roar", 4.0, 0.7)
+	ui.toast("THE CORE SENTINEL AWAKENS!", 5.0)
+	shake_camera(1.0)
+
+
+func on_boss_killed(b) -> void:
+	boss_defeated = true
+	var pos: Vector3 = b.global_position
+	for i in 4:
+		spawn_burst(pos + Vector3(randf_range(-2, 2), randf_range(-2, 2), randf_range(-2, 2)), Color(1.0, 0.5 + i * 0.1, 0.2), 30, 2.0)
+	spawn_burst(pos, Color(1.0, 0.4, 1.0), 40, 2.5)
+	Sfx.play("explode", 6.0, 0.6)
+	Sfx.play("roar", 2.0, 1.4)
+	ui.white_flash(0.8)
+	shake_camera(1.0)
+	remove_entity(b)
+	boss = null
+	for e in entities.duplicate():
+		if e is MobScript and e.minion:
+			e.hurt(999.0, Vector3.ZERO, null)
+	if rocket:
+		rocket.state = "ready"
+	player.add_item(B.DIAMOND, 3)
+	ui.toast("The Sentinel is destroyed! Right-click the rocket to LAUNCH!", 6.0)
+	_check_objectives()
+	save_game()
+
+
+func _launch() -> void:
+	state = "cinematic"
+	cine_t = 0.0
+	rocket.ignite()
+	ui.show_screen("cinematic")
+	Sfx.play("launch", 6.0)
+	cine_cam.current = true
+	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
+
+
+func _cinematic(dt: float) -> void:
+	cine_t += dt
+	var up: Vector3 = VBody.UPS[rocket.face]
+	var fr := VBody.new(null)
+	fr.set_face(rocket.face)
+	var side: Vector3 = fr.frame.x
+	var rp: Vector3 = rocket.global_position + up * 3.0
+	var start: Vector3 = rocket.base + side * 16.0 + fr.frame.z * 6.0 + up * 3.0
+	var end_pos := CENTER + up * 190.0 + side * 140.0
+	var t := smoothstep(2.5, 11.0, cine_t)
+	cine_cam.global_position = start.lerp(end_pos, t)
+	var look := rp.lerp(CENTER + up * 40.0, smoothstep(6.0, 12.0, cine_t))
+	cine_cam.look_at(look, up)
+	if cine_t < 4.0:
+		cine_cam.global_position += Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * 0.15 * (1.0 - cine_t / 4.0)
+	world.light_anchor = cine_cam.global_position
+	_update_sky(dt, up, -1.0 if cine_t < 6.0 else 0.15, false)
+	if cine_t > 13.0:
+		escaped = true
+		_check_objectives()
+		state = "end"
+		var s: Dictionary = player.stats
+		var mins := int(s["time"]) / 60
+		ui.end_stats.text = "Time played: %d min   ·   Blocks mined: %d   ·   Blocks placed: %d\nMonsters defeated: %d   ·   Deaths: %d\n\nThanks for playing!" % [mins, s["mined"], s["placed"], s["kills"], s["deaths"]]
+		ui.show_screen("end")
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		save_game()
+
+
+func continue_after_end() -> void:
+	if rocket and is_instance_valid(rocket):
+		remove_entity(rocket)
+	rocket = null
+	player.camera_current()
+	_update_objective_ui()
+	_resume_play()
