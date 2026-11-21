@@ -247,7 +247,7 @@ static func dress(mi: MeshInstance3D, id: int, world, scale_k := 1.0, vm := fals
 		var sz := 0.36 * scale_k
 		mi.mesh = voxel_mesh(id, sz)
 		# Handle pixel (col 2, row 13) sits in the fist; the head points up and forward.
-		var basis := Basis.from_euler(Vector3(deg_to_rad(-12), deg_to_rad(118), deg_to_rad(-8)))
+		var basis := Basis.from_euler(Vector3(deg_to_rad(-10), deg_to_rad(100), deg_to_rad(0)))
 		mi.basis = basis
 		mi.position = -(basis * Vector3((2.0 - 7.5) * sz / 16.0, (7.5 - 13.0) * sz / 16.0, 0.0))
 	else:
@@ -337,13 +337,22 @@ func update(dt: float, id: int, moving: float, on_ground: bool, sprinting: bool,
 	# landing dip
 	pos.y += land * 0.25
 	# swing
-	pos += Vector3(-0.13 * g, 0.07 * sin(sqrt(s) * TAU) * float(s < 1.0), -0.09 * f)
 	if shown_id <= 0:
+		pos += Vector3(-0.13 * g, 0.07 * sin(sqrt(s) * TAU) * float(s < 1.0), -0.09 * f)
 		# Punch: thrust the fist straight toward the crosshair, knuckles first.
 		pos += Vector3(-0.14 * g, 0.07 * g, -0.2 * g)
 		rot += Vector3(0.2 * g, 0.3 * g, -0.1 * g)
-	else:
-		rot += Vector3(-0.6 * g, 0.3 * f, 0.35 * g)
+	var wrist := 0.0
+	if shown_id > 0 and s < 1.0:
+		# Chop: a short lift, then the wrist snaps the head straight down onto the block while the arm
+		# pushes forward a little - no side-to-side, and the hand stays on screen.
+		var lift := sin(clampf(s / 0.3, 0.0, 1.0) * PI) * 0.25
+		var strike := sin(clampf((s - 0.15) / 0.85, 0.0, 1.0) * PI)
+		rot.x += lift * 0.4 + strike * 0.12
+		rot.y += strike * 0.12
+		pos += Vector3(-0.09 * strike, 0.07 * strike, -0.12 * strike)
+		wrist = lift - strike * 0.6
+	grip.rotation.x = wrist
 	# eating: bring it to the mouth and chew
 	pos = pos.lerp(Vector3(0.12, -0.19 + absf(sin(t * 9.0)) * 0.012, -0.36), eat)
 	rot = rot.lerp(Vector3(0.2, 0.45, -0.1), eat)
