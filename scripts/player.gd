@@ -4,18 +4,24 @@ extends Node3D
 const EYE := 1.62
 const REACH := 5.0
 const SLOTS := 36
+const VMScript := preload("res://scripts/viewmodel.gd")
+const COYOTE := 0.12
+const JUMP_BUFFER := 0.15
+const EAT_TIME := 1.1
 
 var main
 var world
 var body: VBody
 var head: Node3D
 var cam: Camera3D
-var hand: Node3D
-var hand_mesh: MeshInstance3D
+var vm
+var held_light: OmniLight3D
 var model: Node3D
+var model_item: MeshInstance3D
 var legs: Array[Node3D] = []
 var arms: Array[Node3D] = []
 var sel_box: MeshInstance3D
+var sel_mat: StandardMaterial3D
 var crack: MeshInstance3D
 var crack_mat: StandardMaterial3D
 
@@ -42,18 +48,32 @@ var break_pos := Vector3i(-999, 0, 0)
 var dig_tick := 0.0
 var attack_cd := 0.0
 var place_cd := 0.0
-var swing := 0.0
 var since_hurt := 99.0
 var regen_t := 0.0
 var step_acc := 0.0
-var bob := 0.0
 var last_space := -10.0
+var last_fwd := -10.0
+var sprint_latched := false
 var hurt_flash := 0.0
 var shake := 0.0
+var shake_t := 0.0
 var lava_t := 0.0
 var held_shown := -2
 var walk_phase := 0.0
 var cam_dist := 0.0
+var coyote := 0.0
+var jump_buf := 0.0
+var bob_amp := 0.0
+var roll := 0.0
+var hurt_roll := 0.0
+var land_dip := 0.0
+var land_vel := 0.0
+var punch := 0.0
+var eat_prog := 0.0
+var eat_tick := 0.0
+var was_in_water := false
+var hit_marker := 0.0
+var sprinting := false
 
 
 func setup(m, w) -> void:
@@ -69,20 +89,25 @@ func setup(m, w) -> void:
 	cam.near = 0.05
 	cam.far = 900.0
 	head.add_child(cam)
-	hand = Node3D.new()
-	hand.position = Vector3(0.38, -0.34, -0.55)
-	cam.add_child(hand)
-	hand_mesh = MeshInstance3D.new()
-	hand_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	hand.add_child(hand_mesh)
+	vm = VMScript.new()
+	cam.add_child(vm)
+	vm.setup(self)
+	held_light = OmniLight3D.new()
+	held_light.light_color = Color(1.0, 0.72, 0.42)
+	held_light.omni_range = 10.0
+	held_light.omni_attenuation = 1.3
+	held_light.position = Vector3(0.3, -0.2, -0.3)
+	held_light.visible = false
+	cam.add_child(held_light)
 	_build_model()
 	sel_box = MeshInstance3D.new()
-	sel_box.mesh = _line_cube()
-	var lm := StandardMaterial3D.new()
-	lm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	lm.albedo_color = Color(0.05, 0.05, 0.08, 0.7)
-	lm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	sel_box.material_override = lm
+	sel_box.mesh = _edge_cube()
+	sel_mat = StandardMaterial3D.new()
+	sel_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sel_mat.albedo_color = Color(0.02, 0.02, 0.04, 0.6)
+	sel_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	sel_box.material_override = sel_mat
+	sel_box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	sel_box.top_level = true
 	add_child(sel_box)
 	crack = MeshInstance3D.new()
@@ -100,20 +125,26 @@ func setup(m, w) -> void:
 	add_child(crack)
 
 
-func _line_cube() -> ArrayMesh:
-	var v := PackedVector3Array()
-	var s := 0.503
-	var c := [Vector3(-s, -s, -s), Vector3(s, -s, -s), Vector3(s, s, -s), Vector3(-s, s, -s),
-		Vector3(-s, -s, s), Vector3(s, -s, s), Vector3(s, s, s), Vector3(-s, s, s)]
-	for e in [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]:
-		v.append(c[e[0]])
-		v.append(c[e[1]])
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = v
-	var m := ArrayMesh.new()
-	m.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
-	return m
+## Block outline built from 12 thin bars so it stays visible at any distance (GL lines are 1px).
+func _edge_cube() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var s := 0.504
+	var th := 0.016
+	for ax in 3:
+		for a in [-s, s]:
+			for b in [-s, s]:
+				var c := Vector3.ZERO
+				var size := Vector3(th, th, th)
+				size[ax] = s * 2.0 + th
+				var o1 := (ax + 1) % 3
+				var o2 := (ax + 2) % 3
+				c[o1] = a
+				c[o2] = b
+				var bm := BoxMesh.new()
+				bm.size = size
+				st.append_from(bm, 0, Transform3D(Basis.IDENTITY, c))
+	return st.commit()
 
 
 func _box(parent: Node3D, size: Vector3, pos: Vector3, col: Color, emit := 0.0) -> MeshInstance3D:
@@ -153,7 +184,14 @@ func _build_model() -> void:
 		arm.position = Vector3(0.36 * side, 1.36, 0)
 		model.add_child(arm)
 		_box(arm, Vector3(0.2, 0.62, 0.22), Vector3(0, -0.28, 0), suit)
+		_box(arm, Vector3(0.22, 0.14, 0.24), Vector3(0, -0.55, 0), white)
 		arms.append(arm)
+	var grip := Node3D.new()
+	grip.position = Vector3(0, -0.6, -0.06)
+	grip.rotation = Vector3(-PI / 2.0, 0, 0)
+	arms[1].add_child(grip)
+	model_item = MeshInstance3D.new()
+	grip.add_child(model_item)
 	model.visible = false
 
 
@@ -164,9 +202,10 @@ func held_id() -> int:
 	return s["id"] if s else 0
 
 
-func add_item(id: int, n: int) -> int:
+func add_item(id: int, n: int, notify := true) -> int:
 	if id <= 0 or n <= 0:
 		return 0
+	var asked := n
 	var mx := B.stack_max(id)
 	for i in SLOTS:
 		var s = inv[i]
@@ -183,8 +222,11 @@ func add_item(id: int, n: int) -> int:
 			var k := mini(mx, n)
 			inv[i] = {"id": id, "n": k}
 			n -= k
-	if not obtained.has(id):
+	var first := not obtained.has(id)
+	if first:
 		obtained[id] = true
+	if notify and asked > n:
+		main.ui.pickup(id, asked - n, first)
 	main.on_inventory_changed()
 	return n
 
@@ -260,24 +302,33 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not main.is_playing() or dead:
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		yaw -= event.relative.x * sens
-		pitch = clampf(pitch - event.relative.y * sens, -1.55, 1.55)
+		var rel: Vector2 = event.relative * Cfg.sens_mult()
+		yaw -= rel.x * sens
+		pitch = clampf(pitch - rel.y * sens * (-1.0 if Cfg.get_v("invert_y") else 1.0), -1.55, 1.55)
+		vm.add_look(rel)
 	elif event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			sel = (sel + 8) % 9
-			main.ui.refresh_hotbar()
+			select_slot((sel + 8) % 9)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			sel = (sel + 1) % 9
-			main.ui.refresh_hotbar()
+			select_slot((sel + 1) % 9)
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			place_cd = 0.0
 			_use()
+		elif event.button_index == MOUSE_BUTTON_LEFT and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			if target_ent == null and not target and attack_cd <= 0.0:
+				vm.swing()
+				Sfx.play("swing", -16.0, randf_range(0.9, 1.15))
 	elif event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode >= KEY_1 and event.keycode <= KEY_9:
-			sel = event.keycode - KEY_1
-			main.ui.refresh_hotbar()
+			select_slot(event.keycode - KEY_1)
+		elif event.physical_keycode == KEY_W or event.keycode == KEY_UP:
+			var t := Time.get_ticks_msec() / 1000.0
+			if t - last_fwd < 0.28:
+				sprint_latched = true
+			last_fwd = t
 		elif event.keycode == KEY_SPACE:
 			var now := Time.get_ticks_msec() / 1000.0
+			jump_buf = JUMP_BUFFER
 			if creative and now - last_space < 0.3:
 				body.flying = not body.flying
 				body.vel = Vector3.ZERO
@@ -292,7 +343,19 @@ func _unhandled_input(event: InputEvent) -> void:
 				s["n"] -= 1
 				if s["n"] <= 0:
 					inv[sel] = null
+				vm.swing()
+				Sfx.play("swing", -12.0, 1.3)
 				main.on_inventory_changed()
+
+
+func select_slot(i: int) -> void:
+	if i == sel:
+		return
+	sel = i
+	eat_prog = 0.0
+	Sfx.play("tick", -12.0, 1.0 + i * 0.03)
+	main.ui.refresh_hotbar()
+	main.ui.pop_slot(i)
 
 
 func tick(dt: float) -> void:
@@ -301,7 +364,8 @@ func tick(dt: float) -> void:
 	place_cd -= dt
 	since_hurt += dt
 	hurt_flash = maxf(0.0, hurt_flash - dt * 2.0)
-	shake = maxf(0.0, shake - dt * 2.0)
+	shake = maxf(0.0, shake - dt * 1.6)
+	hit_marker = maxf(0.0, hit_marker - dt * 4.0)
 	if dead:
 		_sync_transform()
 		return
@@ -320,7 +384,10 @@ func _movement(dt: float) -> void:
 	var wish := fwd * iz + right * ix
 	if wish.length() > 1.0:
 		wish = wish.normalized()
-	var sprint := Input.is_action_pressed("sprint") and iz > 0.1
+	if iz <= 0.1:
+		sprint_latched = false
+	var sprint := (Input.is_action_pressed("sprint") or sprint_latched) and iz > 0.1 and eat_prog <= 0.0
+	sprinting = sprint and body.vel.length() > 4.0
 	var speed := 4.4
 	if sprint:
 		speed = 6.4
@@ -328,11 +395,17 @@ func _movement(dt: float) -> void:
 		speed = 14.0 if sprint else 9.0
 	if body.in_water:
 		speed *= 0.6
+	if eat_prog > 0.0:
+		speed *= 0.55
 	var u := body.up()
 	var vu := body.vel.dot(u)
 	var hv := body.vel - u * vu
 	var grounded := body.on_ground
-	var accel := 16.0 if (grounded or body.flying) else 4.0
+	coyote = COYOTE if grounded else coyote - dt
+	jump_buf -= dt
+	var accel := 16.0 if (grounded or body.flying) else 6.0
+	if grounded and wish.length() < 0.05:
+		accel = 22.0
 	hv = hv.lerp(wish * speed, 1.0 - exp(-accel * dt))
 	if body.flying:
 		var vert := (1.0 if Input.is_action_pressed("jump") else 0.0) - (1.0 if Input.is_action_pressed("descend") else 0.0)
@@ -340,31 +413,51 @@ func _movement(dt: float) -> void:
 	elif body.in_water or body.in_lava:
 		if Input.is_action_pressed("jump"):
 			vu = minf(vu + 30.0 * dt, 4.5)
-	elif grounded and Input.is_action_pressed("jump"):
+	elif coyote > 0.0 and (jump_buf > 0.0 or (grounded and Input.is_action_pressed("jump"))):
 		vu = 8.7
+		coyote = 0.0
+		jump_buf = 0.0
+		if sprint:
+			hv += wish * 0.8
+		Sfx.play("step", -14.0, 1.25)
 	body.vel = hv + u * vu
 	var was_air := not grounded
 	var pre_up := body.up()
 	body.step(dt)
 	if body.on_ground and was_air and body.land_speed > 3.0:
-		Sfx.play("step", -6.0, 0.8)
+		var ls := body.land_speed
+		_footstep(clampf(-14.0 + ls * 0.7, -14.0, -2.0), 0.8)
+		land_vel -= clampf(ls * 0.035, 0.0, 0.45)
+		vm.land_impact(ls)
+		if ls > 9.0:
+			main.spawn_particles(body.pos + u * 0.05, world.block_at(body.pos - u * 0.2), int(clampf(ls * 0.6, 4, 14)), u)
 	if body.on_ground and not body.flying and body.land_speed > 15.5 and not body.in_water:
 		hurt((body.land_speed - 15.5) * 1.1 + 1.0, Vector3.ZERO, "fall")
+	if body.in_water and not was_in_water and absf(vu) > 3.0:
+		Sfx.play("splash", -4.0, randf_range(0.9, 1.1))
+		main.spawn_particles(body.pos + u * 0.6, B.WATER, 16, u, Color(0.75, 0.88, 1.0))
+	was_in_water = body.in_water
 	var q := body.update_gravity()
 	if q != Quaternion.IDENTITY and pre_up != body.up():
 		main.on_face_changed(body.face)
-	if body.on_ground and hv.length() > 0.5:
-		step_acc += hv.length() * dt
-		walk_phase += hv.length() * dt * 2.2
-		if step_acc > 2.1:
-			step_acc = 0.0
-			Sfx.play("step", -12.0, randf_range(0.85, 1.15))
-		bob += dt * hv.length() * 1.7
+	var hs := hv.length()
+	if body.on_ground and hs > 0.5:
+		var prev := walk_phase
+		walk_phase += hs * dt * 2.1
+		if floori(walk_phase / PI) != floori(prev / PI):
+			_footstep(-15.0 + hs * 0.4, randf_range(0.9, 1.1))
 	else:
 		walk_phase = lerpf(walk_phase, roundf(walk_phase / PI) * PI, 1.0 - exp(-8.0 * dt))
 	var p := body.pos
 	p = p.clamp(Vector3(1.5, 1.5, 1.5), Vector3(126.5, 126.5, 126.5))
 	body.pos = p
+
+
+func _footstep(vol: float, pitch: float) -> void:
+	var b: int = world.block_at(body.pos - body.up() * 0.15)
+	if b == B.AIR or B.SOLID[b] == 0:
+		return
+	Sfx.step(B.info[b]["sound"], vol, pitch)
 
 
 func _interact(dt: float) -> void:
@@ -390,23 +483,82 @@ func _interact(dt: float) -> void:
 	else:
 		break_prog = 0.0
 		break_pos = Vector3i(-999, 0, 0)
-	crack.visible = break_prog > 0.02
+	var mining := break_prog > 0.02
+	sel_mat.albedo_color = Color(0.02, 0.02, 0.04, 0.6).lerp(Color(1, 1, 1, 0.75), (0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.02)) * 0.5 if mining else 0.0)
+	crack.visible = mining
 	if crack.visible:
 		crack.global_position = Vector3(break_pos) + Vector3(0.5, 0.5, 0.5)
 		crack_mat.albedo_texture = T.cracks[clampi(int(break_prog * 10.0), 0, 9)]
-	if Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and place_cd <= 0.0:
+	var rmb := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+	if _eat_update(dt, rmb):
+		return
+	if rmb and place_cd <= 0.0:
 		_use()
+
+
+func is_food(id: int) -> bool:
+	var info: Dictionary = B.info.get(id, {})
+	return not info.is_empty() and not info["block"] and info["food"] > 0
+
+
+## Hold Right Mouse with food: chew for EAT_TIME seconds, then heal. Returns true while eating.
+func _eat_update(dt: float, rmb: bool) -> bool:
+	var id := held_id()
+	var eating := rmb and is_food(id) and (health < max_health or creative) and target_ent == null
+	if eating and target and (target["block"] == B.CRAFTING_TABLE or target["block"] == B.FURNACE):
+		eating = false
+	if not eating:
+		eat_prog = 0.0
+		return false
+	eat_prog += dt
+	eat_tick -= dt
+	if eat_tick <= 0.0:
+		eat_tick = 0.22
+		Sfx.play("eat", -10.0, randf_range(0.85, 1.2))
+		var fwd := look_dir()
+		main.spawn_particles(eye_pos() + fwd * 0.45 - body.up() * 0.25, 0, 4, body.up(), T.block_color.get(id, _food_color(id)))
+	if eat_prog >= EAT_TIME:
+		eat_prog = 0.0
+		var info: Dictionary = B.info[id]
+		health = minf(max_health, health + info["food"])
+		consume_held()
+		Sfx.play("burp", -6.0, randf_range(0.95, 1.1))
+		main.ui.toast("Ate " + info["name"] + "  +%d health" % info["food"], 2.0)
+		main.ui.heal_pulse()
+	return true
+
+
+func _food_color(id: int) -> Color:
+	match id:
+		B.APPLE:
+			return Color(0.85, 0.15, 0.12)
+		B.COOKED_MEAT:
+			return Color(0.55, 0.3, 0.15)
+	return Color(0.9, 0.4, 0.4)
 
 
 func _attack(ent, dir: Vector3) -> void:
 	var tool := B.tool_of(held_id())
 	var dmg: float = tool["dmg"] if tool else 1.0
-	if body.vel.dot(body.up()) < -1.0:
+	var crit := body.vel.dot(body.up()) < -1.0
+	if crit:
 		dmg *= 1.5
 		main.spawn_burst(ent.global_position + body.up(), Color(1, 1, 0.6), 8)
 	attack_cd = 0.42
-	swing = 1.0
+	vm.swing()
+	hit_marker = 1.0
+	punch = 1.0 if crit else 0.6
+	Sfx.play("swing", -14.0, randf_range(1.0, 1.2))
+	if crit:
+		Sfx.play("crit", -6.0, randf_range(0.95, 1.05))
+	var hp0 = ent.get("hp")
+	var pos: Vector3 = ent.global_position + body.up() * 1.2
 	ent.hurt(dmg, dir, self)
+	var hp1 = ent.get("hp") if is_instance_valid(ent) else -1.0
+	if hp0 != null and hp1 != null and hp1 < hp0:
+		main.damage_number(pos, hp0 - maxf(hp1, 0.0), crit)
+		main.hitstop(0.07 if crit else 0.045)
+		shake = maxf(shake, 0.12)
 
 
 func break_time(b: int) -> float:
@@ -444,7 +596,8 @@ func _mine(dt: float) -> void:
 		break_prog = 0.0
 	var t := break_time(b)
 	break_prog += dt / t
-	swing = maxf(swing, 0.6)
+	if not vm.is_swinging():
+		vm.swing()
 	dig_tick -= dt
 	if dig_tick <= 0.0:
 		dig_tick = 0.22
@@ -520,15 +673,9 @@ func _use() -> void:
 		target_ent.interact(self)
 		return
 	var id := held_id()
-	var info: Dictionary = B.info.get(id, {})
-	if info and not info["block"] and info["food"] > 0:
+	if is_food(id):
 		if health >= max_health and not creative:
 			main.ui.toast("You're not hungry - save it for later")
-			return
-		health = minf(max_health, health + info["food"])
-		consume_held()
-		Sfx.play("eat", -4.0)
-		main.ui.toast("Ate " + info["name"] + " (+%d)" % info["food"])
 		return
 	if not target:
 		return
@@ -561,7 +708,9 @@ func _use() -> void:
 	world.set_block(np.x, np.y, np.z, id)
 	stats["placed"] += 1
 	consume_held()
-	swing = 1.0
+	vm.swing()
+	var center := Vector3(np) + Vector3(0.5, 0.5, 0.5)
+	main.spawn_particles(center - Vector3(target["normal"]) * 0.45, id, 6, body.up())
 	Sfx.dig(B.info[id]["sound"], -4.0, 0.8)
 	main.on_block_placed(id)
 
@@ -601,6 +750,10 @@ func hurt(amount: float, knock: Vector3, cause := "") -> void:
 	regen_t = 0.0
 	hurt_flash = 1.0
 	shake = minf(1.0, shake + amount * 0.15)
+	var k_local := cam.global_basis.inverse() * knock if knock != Vector3.ZERO else Vector3(randf_range(-1, 1), 0, 0)
+	hurt_roll = clampf(-k_local.x * 0.02, -0.07, 0.07) if absf(k_local.x) > 0.1 else (0.05 if randf() < 0.5 else -0.05)
+	vm.on_hurt()
+	main.ui.on_player_hurt()
 	Sfx.play("hurt", -2.0, randf_range(0.9, 1.1))
 	if knock != Vector3.ZERO:
 		body.vel += knock
@@ -620,25 +773,50 @@ func respawn() -> void:
 func _visuals(dt: float) -> void:
 	vis_q = vis_q.slerp(body.frame.get_rotation_quaternion(), 1.0 - exp(-9.0 * dt))
 	_sync_transform()
-	var bob_amt := 0.045 if body.on_ground else 0.0
-	head.position = Vector3(cos(bob) * bob_amt * 0.6, EYE + absf(sin(bob)) * bob_amt, 0)
-	if shake > 0.0:
-		head.position += Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * shake * 0.08
-	var fov_target := 78.0
-	if Input.is_action_pressed("sprint") and body.vel.length() > 5.0:
-		fov_target = 88.0
+	var u := body.up()
+	var hv := body.vel - u * body.vel.dot(u)
+	var hs := hv.length()
+	var bob_on: bool = Cfg.get_v("view_bob")
+	var bob_target := clampf(hs / 4.4, 0.0, 1.5) if (body.on_ground and not body.flying and bob_on) else 0.0
+	bob_amp = lerpf(bob_amp, bob_target, 1.0 - exp(-10.0 * dt))
+	# Landing spring: the view dips and recovers.
+	land_vel += -land_dip * 160.0 * dt
+	land_vel *= exp(-13.0 * dt)
+	land_dip += land_vel * dt * 6.0
+	var hp := Vector3(sin(walk_phase) * 0.028 * bob_amp, EYE - absf(cos(walk_phase)) * 0.045 * bob_amp + land_dip, 0)
+	# Smooth noise shake (not per-frame jitter), quadratic falloff.
+	shake_t += dt * 32.0
+	var sh := shake * shake
+	if sh > 0.0:
+		hp += Vector3(sin(shake_t * 1.13) + sin(shake_t * 2.71) * 0.5, sin(shake_t * 1.71 + 1.3) + sin(shake_t * 3.1) * 0.5, 0) * sh * 0.09
+	head.position = hp
+	# Strafe lean, step roll, hurt kick, attack punch.
+	var ix := Input.get_axis("move_left", "move_right")
+	roll = lerpf(roll, -ix * 0.018 * (1.0 if bob_on else 0.0), 1.0 - exp(-6.0 * dt))
+	hurt_roll = lerpf(hurt_roll, 0.0, 1.0 - exp(-7.0 * dt))
+	punch = maxf(0.0, punch - dt * 6.0)
+	cam.rotation = Vector3(-punch * 0.025 + sh * sin(shake_t * 0.9) * 0.02, 0, roll + hurt_roll + sin(walk_phase) * 0.004 * bob_amp + sh * sin(shake_t * 1.4) * 0.03)
+	var base_fov: float = Cfg.get_v("fov")
+	var fov_target := base_fov
+	if sprinting:
+		fov_target = base_fov + 9.0
+	if body.flying and hs > 10.0:
+		fov_target += 5.0
+	if eat_prog > 0.0:
+		fov_target -= 4.0
 	cam.fov = lerpf(cam.fov, fov_target, 1.0 - exp(-8.0 * dt))
-	swing = maxf(0.0, swing - dt * 4.0)
 	var id := held_id()
 	if id != held_shown:
 		held_shown = id
-		_update_hand(id)
-	var sw := sin(swing * PI)
-	hand.rotation = Vector3(-sw * 0.9, sw * 0.25, sw * 0.2)
-	hand.position = Vector3(0.38 - sw * 0.1, -0.34 + sin(bob * 2.0) * 0.012 - sw * 0.05, -0.55 - sw * 0.08)
+		VMScript.dress(model_item, id, world, 2.2)
+	var lit: float = B.LIGHT[id] if B.is_block(id) else (0.5 if id == B.STARCORE else 0.0)
+	held_light.visible = lit > 0.0
+	if held_light.visible:
+		held_light.light_energy = 2.0 * (1.0 + sin(Time.get_ticks_msec() * 0.023) * 0.05 + sin(Time.get_ticks_msec() * 0.037) * 0.04)
+		held_light.light_color = Color(0.95, 0.5, 1.0) if id == B.STARCORE else Color(1.0, 0.72, 0.42)
+	vm.update(dt, id, hs, body.on_ground, sprinting, eat_prog > 0.0, walk_phase)
 	var third := view_mode == 1
 	model.visible = third
-	hand.visible = not third
 	var want := 0.0
 	if third:
 		var back := head.global_basis.z
@@ -647,43 +825,19 @@ func _visuals(dt: float) -> void:
 		want = maxf(want, 0.4)
 	cam_dist = lerpf(cam_dist, want, 1.0 - exp(-12.0 * dt)) if third else 0.0
 	cam.position = Vector3(0, 0.25 * (cam_dist / 4.5), cam_dist)
-	var sw_leg := sin(walk_phase) * 0.7
+	var sw_leg := sin(walk_phase) * 0.7 * clampf(hs / 3.0, 0.0, 1.0)
+	var swing_arc := sin(sqrt(vm.swing_t) * PI) if vm.is_swinging() else 0.0
 	if legs.size() == 2:
 		legs[0].rotation.x = sw_leg
 		legs[1].rotation.x = -sw_leg
-		arms[0].rotation.x = -sw_leg * 0.8 - sin(swing * PI) * 1.2
-		arms[1].rotation.x = sw_leg * 0.8
+		arms[0].rotation.x = -sw_leg * 0.8
+		arms[1].rotation.x = sw_leg * 0.8 - swing_arc * 1.4 - (0.9 if eat_prog > 0.0 else 0.0)
 
 
-func _update_hand(id: int) -> void:
-	hand_mesh.rotation = Vector3.ZERO
-	hand_mesh.scale = Vector3.ONE
-	hand_mesh.material_override = null
-	if id == 0:
-		var bm := BoxMesh.new()
-		bm.size = Vector3(0.1, 0.1, 0.34)
-		hand_mesh.mesh = bm
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = Color(0.95, 0.55, 0.15)
-		hand_mesh.material_override = mat
-		hand_mesh.position = Vector3(0.08, -0.07, 0.12)
-	elif B.is_block(id) and B.RENDER[id] != B.R_CROSS and B.RENDER[id] != B.R_TORCH:
-		hand_mesh.mesh = world.make_block_mesh(id, 0.26)
-		hand_mesh.position = Vector3(0, 0, 0)
-		hand_mesh.rotation = Vector3(0.15, 0.75, 0)
-	else:
-		var qm := QuadMesh.new()
-		qm.size = Vector2(0.42, 0.42)
-		hand_mesh.mesh = qm
-		var mat := StandardMaterial3D.new()
-		mat.albedo_texture = T.icon(id)
-		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
-		mat.alpha_scissor_threshold = 0.5
-		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		hand_mesh.material_override = mat
-		hand_mesh.position = Vector3(0, 0.08, 0)
-		hand_mesh.rotation = Vector3(0, -0.5, 0.35)
+func _process(_dt: float) -> void:
+	vm.visible = view_mode == 0 and not dead and not main.map_view and cam.current and main.state in ["play", "inventory", "pause", "confirm"]
+	if main.state != "play":
+		held_light.visible = held_light.visible and main.state in ["inventory", "pause", "confirm"]
 
 
 # ---------------- save ----------------

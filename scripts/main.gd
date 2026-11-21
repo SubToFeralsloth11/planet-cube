@@ -241,6 +241,7 @@ func _enter_title() -> void:
 	state = "title"
 	title_cam.current = true
 	ui.show_screen("title")
+	ui.fade_in(1.0)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
@@ -298,7 +299,7 @@ func start_game(mode: String) -> void:
 		escaped = false
 		if player.creative:
 			for id in [B.GRASS, B.STONE_BRICKS, B.PLANKS, B.GLASS, B.TORCH, B.LAMP, B.TNT, B.DIAMOND_SWORD, B.DIAMOND_PICK]:
-				player.add_item(id, B.stack_max(id))
+				player.add_item(id, B.stack_max(id), false)
 		world_fresh = false
 		save_game()
 	player.dead = false
@@ -306,7 +307,9 @@ func start_game(mode: String) -> void:
 	_update_objective_ui()
 	ui.refresh_hotbar()
 	_resume_play()
-	ui.toast("Welcome to Planet Cube! Walk off any edge - gravity follows you.", 5.0)
+	ui.fade_in(0.8)
+	var f: int = player.body.face
+	ui.banner(world.BIOME_NAMES[world.FACE_BIOME[f]] + " Face", "Walk off any edge - gravity follows you", 4.0)
 
 
 func _resume_play() -> void:
@@ -339,6 +342,16 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		if state in ["play", "pause", "inventory", "dead", "confirm", "end"]:
 			save_game()
+	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT and state == "play":
+		pause_game()
+
+
+func pause_game() -> void:
+	state = "pause"
+	ui.show_screen("pause")
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	Engine.time_scale = 1.0
+	save_game()
 
 
 func save_game() -> void:
@@ -365,10 +378,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		match event.keycode:
 			KEY_ESCAPE:
 				if state == "play":
-					state = "pause"
-					ui.show_screen("pause")
-					Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-					save_game()
+					pause_game()
 				elif state == "pause":
 					_resume_play()
 				elif state == "inventory":
@@ -402,16 +412,49 @@ func open_inventory() -> void:
 	state = "inventory"
 	ui.show_screen("inventory")
 	ui.open_inventory()
+	Sfx.play("open", -8.0)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
 func close_inventory() -> void:
 	ui.close_inventory()
+	Sfx.play("close", -10.0)
 	_resume_play()
 
 
 func close_confirm() -> void:
 	_resume_play()
+
+
+## Freezes the action for a split second so hits land with weight.
+func hitstop(dur: float) -> void:
+	Engine.time_scale = 0.06
+	get_tree().create_timer(dur, true, false, true).timeout.connect(func(): Engine.time_scale = 1.0)
+
+
+func damage_number(pos: Vector3, dmg: float, crit: bool) -> void:
+	var l := Label3D.new()
+	l.text = ("%d" % roundi(dmg)) + ("!" if crit else "")
+	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	l.no_depth_test = true
+	l.fixed_size = true
+	l.pixel_size = 0.0011
+	l.font_size = 56 if crit else 44
+	l.outline_size = 14
+	l.modulate = Color(1.0, 0.85, 0.2) if crit else Color(1, 1, 1)
+	l.outline_modulate = Color(0.1, 0.02, 0.0, 0.9)
+	l.render_priority = 10
+	add_child(l)
+	var up: Vector3 = player.body.up()
+	var side: Vector3 = player.cam.global_basis.x * randf_range(-0.35, 0.35)
+	l.global_position = pos + side
+	var tw := create_tween().set_parallel(true)
+	tw.tween_property(l, "global_position", pos + side + up * 0.9, 0.7).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	l.scale = Vector3.ONE * 1.6
+	tw.tween_property(l, "scale", Vector3.ONE, 0.18).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(l, "modulate:a", 0.0, 0.3).set_delay(0.45)
+	tw.tween_property(l, "outline_modulate:a", 0.0, 0.3).set_delay(0.45)
+	tw.chain().tween_callback(l.queue_free)
 
 
 # ---------------- main loop ----------------
@@ -463,6 +506,13 @@ func _process(dt: float) -> void:
 			_tick_entities(dt)
 			_update_sky(dt, Vector3(0, 1, 0), 0.25, false)
 	_update_clouds(dt)
+	var muffle := 0.0
+	if state in ["play", "inventory", "dead"] and world.block_at(player.eye_pos()) == B.WATER:
+		muffle = 0.85
+	elif state == "pause" or state == "dead":
+		muffle = 0.55
+	Sfx.set_muffle(muffle, dt)
+	ui.update_always(dt)
 
 
 func _update_cameras(_dt: float) -> void:
@@ -546,8 +596,7 @@ func _update_info() -> void:
 	var depth_txt := "Altitude %d" % alt
 	if alt < world.R:
 		depth_txt = "Depth %d to the core" % alt
-	var mode := "  ·  CREATIVE" if player.creative else ""
-	ui.info_label.text = "%s Face  ·  %s\n%s%s" % [biome, tod, depth_txt, mode]
+	ui.set_info(biome + " Face", tod, d, depth_txt, player.creative)
 
 
 # ---------------- entities ----------------
@@ -747,11 +796,24 @@ func spawn_particles(pos: Vector3, block_id: int, count: int, up: Vector3, col =
 	p.initial_velocity_min = 2.0
 	p.initial_velocity_max = 4.5
 	p.gravity = -up * 16.0
-	p.scale_amount_min = 0.6
-	p.scale_amount_max = 1.2
+	p.scale_amount_min = 0.5
+	p.scale_amount_max = 1.25
+	var sc := Curve.new()
+	sc.add_point(Vector2(0, 1))
+	sc.add_point(Vector2(0.7, 0.85))
+	sc.add_point(Vector2(1, 0))
+	p.scale_amount_curve = sc
+	p.angular_velocity_min = -360.0
+	p.angular_velocity_max = 360.0
 	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
 	p.emission_box_extents = Vector3(0.3, 0.3, 0.3)
-	p.color = col if col != null else T.block_color.get(block_id, Color(0.6, 0.6, 0.6))
+	var base: Color = col if col != null else T.block_color.get(block_id, Color(0.6, 0.6, 0.6))
+	# Random per-chip shade so debris reads as pieces of the texture, not flat confetti.
+	var g := Gradient.new()
+	g.set_color(0, base.darkened(0.3))
+	g.set_color(1, base.lightened(0.18))
+	g.add_point(0.5, base)
+	p.color_initial_ramp = g
 	add_child(p)
 	p.global_position = pos
 	p.emitting = true
@@ -805,7 +867,7 @@ func on_block_placed(_b: int) -> void:
 func on_face_changed(face: int) -> void:
 	var biome: String = world.BIOME_NAMES[world.FACE_BIOME[face]]
 	if world.sky_vis_at(player.body.center()) > 0.5:
-		ui.toast("~ %s Face ~" % biome, 2.5)
+		ui.banner(biome + " Face", ["Gentle hills and wildflowers", "Dense woods - watch for the dark", "Sand, cactus and scorching sun", "Snow, ice and frozen lakes", "Tall peaks and deep valleys", "Basalt, magma and lava lakes"][world.FACE_BIOME[face]], 3.0)
 		Sfx.play("whoosh", -6.0)
 
 
@@ -822,13 +884,14 @@ func on_player_died(cause: String) -> void:
 		"cactus": "Hugged a cactus.",
 	}
 	ui.death_label.text = msgs.get(cause, "You died.")
-	ui.show_screen("death")
+	ui.show_death(player.stats)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
 func respawn() -> void:
 	player.respawn()
 	_resume_play()
+	ui.fade_in(0.6)
 
 
 func _check_objectives() -> void:
@@ -839,9 +902,8 @@ func _check_objectives() -> void:
 			advanced = true
 			break
 	if advanced:
-		Sfx.play("objective", -3.0)
-		if objective < objectives.size():
-			ui.toast("Mission complete!  Next: " + objectives[objective][0], 4.0)
+		Sfx.play("mission", -3.0)
+		ui.mission_complete(objectives[objective - 1][0], objectives[objective][0] if objective < objectives.size() else "")
 		_update_objective_ui()
 
 

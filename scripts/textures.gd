@@ -605,6 +605,13 @@ func icon(id: int) -> Texture2D:
 	return tex
 
 
+## 16x16 pixel art for anything that is held flat (tools, items, plants, torches).
+func item_image(id: int) -> Image:
+	if B.is_block(id):
+		return images[B.texture_names[B.TEX_SIDE[id]]]
+	return _item_img(id, false)
+
+
 func _iso(id: int) -> Image:
 	var top: Image = images[B.texture_names[B.TEX_TOP[id]]]
 	var side: Image = images[B.texture_names[B.TEX_SIDE[id]]]
@@ -681,7 +688,7 @@ func _outline(im: Image) -> void:
 					break
 
 
-func _item_img(id: int) -> Image:
+func _item_img(id: int, outline := true) -> Image:
 	var im := _img()
 	var stick := Color(0.55, 0.38, 0.2)
 	if id >= B.WOOD_PICK and id <= B.DIAMOND_SWORD:
@@ -708,7 +715,8 @@ func _item_img(id: int) -> Image:
 				_line(im, 12.5, 2.5, 2.5, 12.5, col.lightened(0.35), 0.4)
 				_line(im, 9, 3, 13, 7, col.darkened(0.25), 0.8)
 				_line(im, 15, 0, 12, 3, stick, 0.8)
-		_outline(im)
+		if outline:
+			_outline(im)
 		return im
 	match id:
 		B.STICK:
@@ -794,5 +802,6 @@ func _item_img(id: int) -> Image:
 			for x in range(6, 10):
 				im.set_pixel(x, 13, Color(1, 0.7, 0.2))
 				im.set_pixel(x, 14, Color(1, 0.4, 0.1) if x % 2 == 0 else Color(0, 0, 0, 0))
-	_outline(im)
+	if outline:
+		_outline(im)
 	return im
