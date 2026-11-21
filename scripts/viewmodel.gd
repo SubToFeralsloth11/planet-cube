@@ -58,7 +58,7 @@ var lowering := false
 var swing_t := 1.0
 var eat := 0.0
 var sway := Vector2.ZERO
-var sway_vel := Vector2.ZERO
+var look_acc := Vector2.ZERO
 var land := 0.0
 var land_vel := 0.0
 var sprint := 0.0
@@ -270,7 +270,7 @@ func is_swinging() -> bool:
 
 
 func land_impact(speed: float) -> void:
-	land_vel -= clampf(speed * 0.06, 0.0, 0.9)
+	land_vel -= clampf(speed * 0.02, 0.0, 0.3)
 
 
 func on_hurt() -> void:
@@ -278,7 +278,7 @@ func on_hurt() -> void:
 
 
 func add_look(rel: Vector2) -> void:
-	sway_vel += rel * 0.00055
+	look_acc += rel
 
 
 # ---------------- per frame ----------------
@@ -294,25 +294,26 @@ func update(dt: float, id: int, moving: float, on_ground: bool, sprinting: bool,
 		else:
 			lowering = true
 	if lowering:
-		equip = move_toward(equip, 1.0, dt * 9.0)
+		equip = move_toward(equip, 1.0, dt * 6.0)
 		if equip >= 1.0:
 			lowering = false
 			shown_id = pending_id
 			dress(item, shown_id, player.world, 1.0, true)
 	else:
-		equip = move_toward(equip, 0.0, dt * 5.0)
-	swing_t = minf(1.0, swing_t + dt / 0.27)
-	eat = move_toward(eat, 1.0 if eating else 0.0, dt * 7.0)
-	sprint = lerpf(sprint, 1.0 if sprinting else 0.0, 1.0 - exp(-8.0 * dt))
+		equip = move_toward(equip, 0.0, dt * 3.5)
+	swing_t = minf(1.0, swing_t + dt / 0.34)
+	eat = move_toward(eat, 1.0 if eating else 0.0, dt * 5.0)
+	sprint = lerpf(sprint, 1.0 if sprinting else 0.0, 1.0 - exp(-5.0 * dt))
 	hurt = maxf(0.0, hurt - dt * 3.0)
-	# Damped springs for mouse sway and landing dip.
-	sway_vel += -sway * 120.0 * dt
-	sway_vel *= exp(-14.0 * dt)
-	sway += sway_vel * dt * 60.0
-	sway = sway.clamp(Vector2(-0.12, -0.12), Vector2(0.12, 0.12))
-	land_vel += -land * 140.0 * dt
-	land_vel *= exp(-12.0 * dt)
-	land += land_vel * dt * 6.0
+	# Mouse sway: the arm trails slightly behind the look speed, eased so it never snaps.
+	var look_speed := look_acc / maxf(dt, 0.001)
+	look_acc = Vector2.ZERO
+	var sway_target := (look_speed * 0.00003).clamp(Vector2(-0.05, -0.05), Vector2(0.05, 0.05))
+	sway = sway.lerp(sway_target, 1.0 - exp(-6.0 * dt))
+	# Soft landing spring.
+	land_vel += -land * 60.0 * dt
+	land_vel *= exp(-9.0 * dt)
+	land += land_vel * dt * 4.0
 	var amt := clampf(moving / 4.4, 0.0, 1.4) * (1.0 if on_ground else 0.25)
 	var e := ease(equip, 0.6)
 	var s := swing_t
@@ -324,26 +325,37 @@ func update(dt: float, id: int, moving: float, on_ground: bool, sprinting: bool,
 		pos = Vector3(0.33, -0.29, -0.46)
 		rot = Vector3(deg_to_rad(14), deg_to_rad(10), deg_to_rad(-6))
 	# walk bob (figure eight) and idle breathing
-	pos += Vector3(sin(phase) * 0.014 * amt, -absf(cos(phase)) * 0.02 * amt + sin(t * 1.7) * 0.004, 0)
-	rot.z += sin(phase) * 0.03 * amt
+	pos += Vector3(sin(phase) * 0.008 * amt, -absf(cos(phase)) * 0.011 * amt + sin(t * 1.7) * 0.003, 0)
+	rot.z += sin(phase) * 0.015 * amt
 	# mouse sway: the arm lags behind where you look
-	rot.y += sway.x * 1.2
-	rot.x += sway.y * 1.0
-	pos += Vector3(-sway.x * 0.25, sway.y * 0.2, 0)
+	rot.y += sway.x * 0.8
+	rot.x += sway.y * 0.6
+	pos += Vector3(-sway.x * 0.15, sway.y * 0.12, 0)
 	# sprint: tilt the arm down and in
 	pos += Vector3(0.03, -0.05, 0.03) * sprint
-	rot += Vector3(-0.32, 0.4, 0.12) * sprint
+	rot += Vector3(-0.15, 0.2, 0.08) * sprint
 	# landing dip
 	pos.y += land * 0.25
 	# swing
 	pos += Vector3(-0.13 * g, 0.07 * sin(sqrt(s) * TAU) * float(s < 1.0), -0.09 * f)
-	rot += Vector3(-1.05 * g, 0.55 * f, 0.45 * g)
+	if shown_id <= 0:
+		# Punch: thrust the fist straight toward the crosshair, knuckles first.
+		pos += Vector3(-0.14 * g, 0.07 * g, -0.2 * g)
+		rot += Vector3(0.2 * g, 0.3 * g, -0.1 * g)
+	else:
+		rot += Vector3(-0.6 * g, 0.3 * f, 0.35 * g)
 	# eating: bring it to the mouth and chew
-	pos = pos.lerp(Vector3(0.12, -0.19 + absf(sin(t * 14.0)) * 0.02, -0.36), eat)
-	rot = rot.lerp(Vector3(0.25, 0.9, -0.1), eat)
+	pos = pos.lerp(Vector3(0.12, -0.19 + absf(sin(t * 9.0)) * 0.012, -0.36), eat)
+	rot = rot.lerp(Vector3(0.2, 0.45, -0.1), eat)
 	# equip / hurt
 	pos.y -= 0.42 * e
-	rot.x -= 0.7 * e
+	rot.x -= 0.3 * e
 	pos.y -= hurt * 0.04
-	rig.position = pos
-	rig.rotation = rot
+	# Rotate about the shoulder (back end of the sleeve), not the fist, so the part of the arm nearest
+	# the camera stays put and only the hand end moves - like a real arm.
+	var shoulder := Vector3(0, 0, 0.55)
+	var rest_e := Vector3(14, 10, -6) if shown_id <= 0 else Vector3(10, 20, 2)
+	var rest_basis := Basis.from_euler(rest_e * (PI / 180.0))
+	var b := Basis.from_euler(rot)
+	rig.basis = b
+	rig.position = pos + rest_basis * shoulder - b * shoulder
