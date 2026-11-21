@@ -1,0 +1,76 @@
+{
+  "version": "0.1 alpha",
+  "updated": "2026-11-21",
+  "status": "Playable from start to finish",
+  "areas": [
+    {
+      "name": "World & planet",
+      "items": [
+        {"text": "Cube-shaped voxel planet (128³ world, 68-block faces)", "state": "done"},
+        {"text": "Walk off any edge - gravity rotates onto the next face", "state": "done"},
+        {"text": "Six biome faces: Meadow, Forest, Desert, Tundra, Highlands, Ashlands", "state": "done"},
+        {"text": "Caves, lava layer, ore depth bands, glowing Starcore core chamber", "state": "done"},
+        {"text": "Trees, cacti, flowers, lakes, frozen lakes, lava lakes", "state": "done"},
+        {"text": "Flowing water and lava", "state": "planned"}
+      ]
+    },
+    {
+      "name": "Survival & progression",
+      "items": [
+        {"text": "Hold-to-mine with tool tiers (hand → wood → stone → iron → diamond)", "state": "done"},
+        {"text": "Building with 50+ blocks, torches, lamps, glass, wool colours", "state": "done"},
+        {"text": "Crafting list, crafting table and furnace stations, furnace fuel", "state": "done"},
+        {"text": "16-step mission guide from first tree to escape", "state": "done"},
+        {"text": "Health, fall/lava/cactus damage, food, regeneration", "state": "done"},
+        {"text": "Ladders, doors, beds and chests", "state": "planned"}
+      ]
+    },
+    {
+      "name": "Creatures & combat",
+      "items": [
+        {"text": "Pigs, cows and sheep (coloured wool)", "state": "done"},
+        {"text": "Zombies (burn in daylight) and exploding Boomers", "state": "done"},
+        {"text": "Swords, critical hits, knockback, TNT with chain reactions", "state": "done"},
+        {"text": "Final boss: the Core Sentinel (magma bolts, slam shockwave, enrage, minions)", "state": "done"},
+        {"text": "More cave creatures", "state": "planned"}
+      ]
+    },
+    {
+      "name": "The escape",
+      "items": [
+        {"text": "Rocket parts: hull, engine, fuel cells, navigation core", "state": "done"},
+        {"text": "Launch pad placement and launch sequence", "state": "done"},
+        {"text": "Launch cinematic and ending screen with stats", "state": "done"}
+      ]
+    },
+    {
+      "name": "Look & feel",
+      "items": [
+        {"text": "Procedural pixel-art textures and item icons (no external assets)", "state": "done"},
+        {"text": "Day/night that sweeps across every face, moonlight, stars, sunsets", "state": "done"},
+        {"text": "Real-time sun shadows, torch lights, glow, ambient occlusion, fog, clouds", "state": "done"},
+        {"text": "Synthesized sound effects and ambient music", "state": "done"},
+        {"text": "First person, third person (V) and planet map view (hold M)", "state": "done"},
+        {"text": "Settings menu (FOV, render scale, volume)", "state": "planned"},
+        {"text": "Play-in-browser web build", "state": "planned"}
+      ]
+    },
+    {
+      "name": "Tech",
+      "items": [
+        {"text": "Godot 4.7 Forward+, chunked meshing (16³), world builds in ~1.3 s", "state": "done"},
+        {"text": "Autosave + Continue, Survival and Creative (flying) modes", "state": "done"},
+        {"text": "Retina-aware render scale (~60 FPS on a MacBook at 5K window)", "state": "done"},
+        {"text": "Headless simulation + end-to-end flow tests", "state": "done"}
+      ]
+    }
+  ],
+  "log": [
+    {"date": "2026-11-21", "title": "First playable build", "notes": [
+      "Built the full game loop: spawn → trees → tools → ores → core → rocket → boss → escape.",
+      "Verified edge-walking gravity, mining, crafting, boss fight, launch, ending and save/continue in headless tests.",
+      "Tuned rendering for Retina screens: half-res 3D with full-res UI, MSAA/FSR removed (27 → ~60 FPS).",
+      "Fixed missing pickaxe heads in item icons and flickering ground detection at high frame rates."
+    ]}
+  ]
+}
