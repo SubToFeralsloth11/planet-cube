@@ -271,18 +271,19 @@ func hurt(dmg: float, dir: Vector3, attacker) -> void:
 		main.remove_entity(self)
 
 
-func _drops(p) -> void:
+func _drops(_p) -> void:
+	var c := body.center()
+	var u := body.up()
 	match kind:
 		"pig":
-			p.add_item(B.RAW_MEAT, randi_range(1, 3))
+			main.pop_drop(B.RAW_MEAT, randi_range(1, 3), c, u)
 		"cow":
-			p.add_item(B.RAW_MEAT, randi_range(2, 3))
+			main.pop_drop(B.RAW_MEAT, randi_range(2, 3), c, u)
 		"sheep":
-			p.add_item(wool, randi_range(1, 3))
-			p.add_item(B.RAW_MEAT, 1)
+			main.pop_drop(wool, randi_range(1, 3), c, u)
+			main.pop_drop(B.RAW_MEAT, 1, c, u)
 		"zombie":
 			if randf() < 0.5:
-				p.add_item(B.IRON_INGOT if randf() < 0.15 else B.COAL, 1)
+				main.pop_drop(B.IRON_INGOT if randf() < 0.15 else B.COAL, 1, c, u)
 		"boomer":
-			p.add_item(B.GUNPOWDER, randi_range(1, 2))
-	Sfx.play("pop", -6.0)
+			main.pop_drop(B.GUNPOWDER, randi_range(1, 2), c, u)

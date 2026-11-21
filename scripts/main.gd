@@ -10,6 +10,7 @@ const MobScript := preload("res://scripts/mob.gd")
 const BossScript := preload("res://scripts/boss.gd")
 const BoltScript := preload("res://scripts/bolt.gd")
 const TntScript := preload("res://scripts/tnt.gd")
+const DropScript := preload("res://scripts/drop.gd")
 const RocketScript := preload("res://scripts/rocket.gd")
 const CENTER := Vector3(64, 64, 64)
 
@@ -276,6 +277,8 @@ func start_game(mode: String) -> void:
 			_spawn_rocket(rd["face"], rd["pos"])
 			if boss_defeated:
 				rocket.state = "ready"
+		for dd in data.get("drops", []):
+			spawn_drop(dd[0], dd[1], dd[2], Vector3.ZERO, 0.0)
 	else:
 		if not world_fresh or has_save():
 			await _load_world(randi() % 1000000, {})
@@ -361,6 +364,7 @@ func save_game() -> void:
 		"version": 1, "seed": world.world_seed, "edits": world.edits, "player": player.to_dict(),
 		"time": time_of_day, "objective": objective, "boss_defeated": boss_defeated, "escaped": escaped,
 		"rocket": {"face": rocket.face, "pos": rocket.base} if (rocket and is_instance_valid(rocket) and rocket.state != "launching") else null,
+		"drops": _drop_list(),
 	}
 	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if f:
@@ -742,6 +746,35 @@ func summon_minions(pos: Vector3, face: int) -> void:
 			m.minion = true
 			spawn_burst(p + up, Color(1.0, 0.4, 0.2), 16)
 	ui.toast("The Sentinel summons its minions!")
+
+
+## Drops an item into the world. `delay` = seconds before it can be picked up (so thrown items fly first).
+func spawn_drop(id: int, n: int, pos: Vector3, vel: Vector3, delay := 0.35) -> void:
+	if id <= 0 or n <= 0:
+		return
+	var mx := B.stack_max(id)
+	while n > 0:
+		var k := mini(n, mx)
+		n -= k
+		var d := DropScript.new()
+		add_child(d)
+		d.setup(self, world, id, k, pos, vel, delay)
+		entities.append(d)
+
+
+## Pops an item out of a block or mob with a little random hop.
+func pop_drop(id: int, n: int, pos: Vector3, up: Vector3) -> void:
+	var side := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1))
+	side -= up * side.dot(up)
+	spawn_drop(id, n, pos, up * 3.5 + side * 1.5)
+
+
+func _drop_list() -> Array:
+	var out := []
+	for e in entities:
+		if e is DropScript and is_instance_valid(e) and not e.dead:
+			out.append([e.id, e.n, e.body.pos])
+	return out
 
 
 func spawn_tnt(pos: Vector3, fuse := 3.0) -> void:

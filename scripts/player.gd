@@ -339,10 +339,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.keycode == KEY_Q:
 			if inv[sel]:
 				var s = inv[sel]
-				main.ui.toast("Dropped " + B.item_name(s["id"]))
-				s["n"] -= 1
+				var k: int = s["n"] if event.ctrl_pressed or event.meta_pressed else 1
+				s["n"] -= k
 				if s["n"] <= 0:
 					inv[sel] = null
+				var fwd := look_dir()
+				main.spawn_drop(s["id"], k, eye_pos() + fwd * 0.5 - body.up() * 0.3, fwd * 6.0 + body.up() * 2.0 + body.vel * 0.5, 1.2)
 				vm.swing()
 				Sfx.play("swing", -12.0, 1.3)
 				main.on_inventory_changed()
@@ -629,11 +631,7 @@ func break_block(p: Vector3i, b: int) -> void:
 				drop = B.STICK
 				n = 1
 		if drop > 0:
-			var left := add_item(drop, n)
-			if left > 0:
-				main.ui.toast("Inventory full!")
-			else:
-				Sfx.play("pop", -8.0, randf_range(0.9, 1.3))
+			main.pop_drop(drop, n, Vector3(p) + Vector3(0.5, 0.5, 0.5) - body.up() * 0.2, body.up())
 	elif not creative and B.info[b]["tier"] > 0:
 		var need: int = B.info[b]["tier"]
 		main.ui.toast("Needs a %s pickaxe or better!" % B.TIER_NAMES[need])
@@ -644,7 +642,7 @@ func break_block(p: Vector3i, b: int) -> void:
 	if B.RENDER[ab] == B.R_CROSS or B.RENDER[ab] == B.R_TORCH:
 		world.set_block(above.x, above.y, above.z, B.AIR)
 		if ab == B.TORCH or ab == B.FLOWER_RED or ab == B.FLOWER_YELLOW:
-			add_item(ab, 1)
+			main.pop_drop(ab, 1, Vector3(above) + Vector3(0.5, 0.5, 0.5), body.up())
 	main.on_block_broken(b)
 
 
