@@ -1133,7 +1133,20 @@ func _quad(i: int, x: int, y: int, z: int, f: int, b: int, ua: int, us: int, rt:
 		var cc := occ[bl[n + ao[2]]]
 		var lvl := 0 if (s1 == 1 and s2 == 1) else 3 - (s1 + s2 + cc)
 		lv[k] = lvl
-		var col := Color(shade * AO_LEVELS[lvl], vis, emit, 1.0)
+		# Smooth light: average the sky visibility of the open cells around this corner so shade
+		# fades across block edges instead of stepping per face.
+		var sv := vis
+		var cnt := 1.0
+		if s1 == 0:
+			sv += sky_vis(n + ao[0])
+			cnt += 1.0
+		if s2 == 0:
+			sv += sky_vis(n + ao[1])
+			cnt += 1.0
+		if cc == 0 and (s1 == 0 or s2 == 0):
+			sv += sky_vis(n + ao[2])
+			cnt += 1.0
+		var col := Color(shade * AO_LEVELS[lvl], sv / cnt, emit, 1.0)
 		if wat:
 			_wv.append(p); _wn.append(nrm); _wuv.append(uv); _wuv2.append(Vector2(layer_i, anim)); _wc.append(col)
 		else:

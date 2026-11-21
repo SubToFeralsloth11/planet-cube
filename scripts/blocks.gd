@@ -194,7 +194,7 @@ func _register_blocks() -> void:
 	_blk(COAL_ORE, "Coal Ore", "coal_ore", 3.0, "pick", 1, {"drop": COAL})
 	_blk(IRON_ORE, "Iron Ore", "iron_ore", 3.0, "pick", 2)
 	_blk(GOLD_ORE, "Gold Ore", "gold_ore", 3.0, "pick", 3)
-	_blk(DIAMOND_ORE, "Diamond Ore", "diamond_ore", 3.5, "pick", 3, {"drop": DIAMOND, "emit": 0.15})
+	_blk(DIAMOND_ORE, "Diamond Ore", "diamond_ore", 3.5, "pick", 3, {"drop": DIAMOND})
 	_blk(STARCORE_ORE, "Starcore Ore", "starcore_ore", 4.0, "pick", 4, {"drop": STARCORE, "emit": 0.9})
 	_blk(CORE_ROCK, "Core Rock", "core_rock", 3.5, "pick", 4, {"emit": 0.35})
 	_blk(BASALT, "Basalt", ["basalt_top", "basalt"], 1.5, "pick", 1)
@@ -210,7 +210,7 @@ func _register_blocks() -> void:
 	_blk(BRICKS, "Bricks", "bricks", 2.0, "pick", 1)
 	_blk(IRON_BLOCK, "Iron Block", "iron_block", 4.0, "pick", 2)
 	_blk(GOLD_BLOCK, "Gold Block", "gold_block", 4.0, "pick", 2)
-	_blk(DIAMOND_BLOCK, "Diamond Block", "diamond_block", 4.0, "pick", 2, {"emit": 0.15})
+	_blk(DIAMOND_BLOCK, "Diamond Block", "diamond_block", 4.0, "pick", 2)
 	_blk(LAMP, "Glow Lamp", "lamp", 0.4, "", 0, {"light": 1.4, "emit": 1.0, "sound": "glass"})
 	_blk(TNT, "TNT", ["tnt_top", "tnt_side", "tnt_bottom"], 0.1, "", 0, {"sound": "grass"})
 	var wools := [["White", "wool_white"], ["Red", "wool_red"], ["Orange", "wool_orange"], ["Yellow", "wool_yellow"],
