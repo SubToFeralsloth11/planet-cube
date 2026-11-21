@@ -1,5 +1,5 @@
 {
-  "version": "0.1 alpha",
+  "version": "1.0",
   "updated": "2026-11-21",
   "status": "Playable from start to finish",
   "areas": [
@@ -51,7 +51,10 @@
         {"text": "Real-time sun shadows, torch lights, glow, ambient occlusion, fog, clouds", "state": "done"},
         {"text": "Synthesized sound effects and ambient music", "state": "done"},
         {"text": "First person, third person (V) and planet map view (hold M)", "state": "done"},
-        {"text": "Settings menu (FOV, render scale, volume)", "state": "planned"},
+        {"text": "Settings menu (volume, music, sensitivity, invert Y, FOV, view bobbing, fullscreen, FPS)", "state": "done"},
+        {"text": "3D first-person arm with voxel-extruded tools, swing/equip/eat/sway animations, never clips walls", "state": "done"},
+        {"text": "Game feel: hit-stop, damage numbers, landing dip, coyote jump, material footsteps, camera lean", "state": "done"},
+        {"text": "Redesigned HUD and menus: hotbar dock, pickup feed, mission banners, blurred pause, rich tooltips", "state": "done"},
         {"text": "Play-in-browser web build", "state": "planned"}
       ]
     },
@@ -66,6 +69,12 @@
     }
   ],
   "log": [
+    {"date": "2026-11-21", "title": "Polish pass: hand, UI and game feel", "notes": [
+      "Replaced the flat hand sprite with a lit 3D arm; held items are extruded from their pixel art.",
+      "New HUD, menus, settings, tooltips, pickup feed, mission banners, death and pause screens.",
+      "Added hit-stop, damage numbers, crits, hold-to-eat, landing/strafe camera feel, coyote time and jump buffering.",
+      "Audio buses with underwater muffle, material footsteps, UI sounds and a 64-second seamless music loop."
+    ]},
     {"date": "2026-11-21", "title": "First playable build", "notes": [
       "Built the full game loop: spawn → trees → tools → ores → core → rocket → boss → escape.",
       "Verified edge-walking gravity, mining, crafting, boss fight, launch, ending and save/continue in headless tests.",
