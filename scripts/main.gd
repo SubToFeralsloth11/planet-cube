@@ -50,6 +50,8 @@ var objectives: Array = []
 
 func _ready() -> void:
 	randomize()
+	# Main keeps running while the tree is paused (menus, sky); pausable children (particles) freeze.
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	_setup_input()
 	_setup_env()
 	world = WorldScript.new()
@@ -317,6 +319,7 @@ func start_game(mode: String) -> void:
 
 func _resume_play() -> void:
 	state = "play"
+	get_tree().paused = false
 	ui.show_screen("")
 	player.cam.current = true
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -327,6 +330,7 @@ func resume() -> void:
 
 
 func save_and_title() -> void:
+	get_tree().paused = false
 	save_game()
 	_clear_entities()
 	rocket = null
@@ -345,15 +349,18 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		if state in ["play", "pause", "inventory", "dead", "confirm", "end"]:
 			save_game()
-	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT and state == "play":
+	elif what in [NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_WM_WINDOW_FOCUS_OUT] and state == "play":
 		pause_game()
 
 
 func pause_game() -> void:
+	if state != "play":
+		return
 	state = "pause"
 	ui.show_screen("pause")
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	Engine.time_scale = 1.0
+	get_tree().paused = true
 	save_game()
 
 
@@ -465,7 +472,8 @@ func damage_number(pos: Vector3, dmg: float, crit: bool) -> void:
 
 func _process(dt: float) -> void:
 	dt = minf(dt, 0.05)
-	time_of_day = fmod(time_of_day + dt / DAY_LEN, 1.0)
+	if state in ["play", "dead", "cinematic", "title", "end"]:
+		time_of_day = fmod(time_of_day + dt / DAY_LEN, 1.0)
 	var ang := time_of_day * TAU
 	var axis := Vector3(1, 1, 1).normalized()
 	var p0 := Vector3(-1, 2, -1).normalized()
@@ -819,6 +827,7 @@ func explode(pos: Vector3, radius: float, dmg: float, no_terrain_near_rocket := 
 
 func spawn_particles(pos: Vector3, block_id: int, count: int, up: Vector3, col = null) -> void:
 	var p := CPUParticles3D.new()
+	p.process_mode = Node.PROCESS_MODE_PAUSABLE
 	p.one_shot = true
 	p.amount = count
 	p.lifetime = 0.9
@@ -855,6 +864,7 @@ func spawn_particles(pos: Vector3, block_id: int, count: int, up: Vector3, col =
 
 func spawn_burst(pos: Vector3, col: Color, count: int, size := 1.0) -> void:
 	var p := CPUParticles3D.new()
+	p.process_mode = Node.PROCESS_MODE_PAUSABLE
 	p.one_shot = true
 	p.amount = maxi(count, 1)
 	p.lifetime = 0.7
