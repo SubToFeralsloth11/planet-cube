@@ -46,6 +46,7 @@ var cloud_mat: StandardMaterial3D
 var part_mesh: BoxMesh
 var burst_mesh: BoxMesh
 var objectives: Array = []
+var discovered := {}
 
 
 func _ready() -> void:
@@ -599,6 +600,13 @@ func daylight(face: int) -> float:
 
 
 func _update_info() -> void:
+	var here: Vector3 = player.body.center()
+	for s in world.structures:
+		var key: String = "%s@%v" % [s["name"], s["pos"]]
+		if not discovered.has(key) and here.distance_to(s["pos"]) < s["radius"]:
+			discovered[key] = true
+			ui.banner(s["name"], s["sub"], 3.5, "✦  DISCOVERED  ✦")
+			Sfx.play("mission", -6.0, 0.8)
 	var f: int = player.body.face
 	var biome: String = world.BIOME_NAMES[world.FACE_BIOME[f]]
 	var d := daylight(f)

@@ -39,6 +39,9 @@ var light_nodes := {}
 var mat_solid: ShaderMaterial
 var mat_water: ShaderMaterial
 var light_anchor := Vector3.ZERO
+## Generated landmarks: [{name, sub, pos: Vector3 (world), radius}]. Rebuilt every generate().
+var structures: Array = []
+var _gen_lights: Array[int] = []
 
 var _fc := []
 var _fao := []
@@ -241,6 +244,9 @@ func generate(seed_val: int, progress: Callable) -> void:
 	progress.call(0.46, "Growing forests...")
 	await get_tree().process_frame
 	_decorate()
+	progress.call(0.48, "Raising villages and ruins...")
+	await get_tree().process_frame
+	_structures()
 
 
 func apply_edits() -> void:
@@ -274,6 +280,9 @@ func finish_build(progress: Callable) -> void:
 	for l in light_nodes.values():
 		l.queue_free()
 	light_nodes.clear()
+	for i in _gen_lights:
+		if B.LIGHT[blocks[i]] > 0.0 and not edits.has(i):
+			_add_light(i, blocks[i])
 	for k in edits:
 		if B.LIGHT[edits[k]] > 0.0:
 			_add_light(k, edits[k])
@@ -551,6 +560,229 @@ func _tree_spruce(f: int, u: int, v: int, l0: int, rng: RandomNumberGenerator) -
 				if absi(du) + absi(dv) > rad + (1 if rad == 2 else 0):
 					continue
 				_put(f, u + du, v + dv, l0 + k, B.SPRUCE_LEAVES, false)
+
+
+# ---------------- structures ----------------
+
+func _structures() -> void:
+	structures.clear()
+	_gen_lights.clear()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = world_seed + 4242
+	_village(2, C + 15, C - 13, rng)
+	_village(5, C + rng.randi_range(-6, 6), C + rng.randi_range(-6, 6), rng)
+	_pyramid(1, C + rng.randi_range(-6, 6), C + rng.randi_range(-6, 6), rng)
+	_ruins(2, C - 12, C + 12, 23, rng)
+	_ruins(4, C + rng.randi_range(-6, 6), C + rng.randi_range(-6, 6), 22, rng)
+
+
+func _place(f: int, u: int, v: int, l: int, b: int) -> void:
+	_put(f, u, v, l, b, true)
+	if B.LIGHT[b] > 0.0 and u >= 2 and v >= 2 and u <= W - 3 and v <= W - 3 and l <= C - 3:
+		_gen_lights.append(fidx(f, u, v, l))
+
+
+func _peek(f: int, u: int, v: int, l: int) -> int:
+	return blocks[fidx(f, u, v, l)]
+
+
+func _fpos(f: int, u: int, v: int, l: int) -> Vector3:
+	var i := fidx(f, u, v, l)
+	return Vector3(i & 127, (i >> 7) & 127, i >> 14) + Vector3(0.5, 0.5, 0.5)
+
+
+func _h(f: int, u: int, v: int) -> int:
+	return hmap[(f * W + u) * W + v]
+
+
+## Levels the ground: solid foundation below `base`, air from `base` to base+height.
+func _flatten(f: int, u0: int, v0: int, rad: int, base: int, height: int, top: int, fill: int) -> void:
+	for du in range(-rad, rad + 1):
+		for dv in range(-rad, rad + 1):
+			var u := u0 + du
+			var v := v0 + dv
+			for l in range(base - 6, base - 1):
+				if B.SOLID[_peek(f, u, v, l)] == 0:
+					_place(f, u, v, l, fill)
+			_place(f, u, v, base - 1, top)
+			for l in range(base, base + height):
+				_place(f, u, v, l, B.AIR)
+
+
+func _village(f: int, cu: int, cv: int, rng: RandomNumberGenerator) -> void:
+	var base := _h(f, cu, cv)
+	if base <= SEA + 1:
+		base = SEA + 2
+	var ground: int = B.SNOW if FACE_BIOME[f] == TUNDRA else B.GRASS
+	_flatten(f, cu, cv, 13, base, 10, ground, B.DIRT)
+	# Well in the middle.
+	for du in range(-2, 3):
+		for dv in range(-2, 3):
+			var edge := absi(du) == 2 or absi(dv) == 2
+			_place(f, cu + du, cv + dv, base - 1, B.COBBLE)
+			if edge:
+				_place(f, cu + du, cv + dv, base, B.COBBLE)
+			else:
+				for l in range(base - 4, base):
+					_place(f, cu + du, cv + dv, l, B.WATER)
+			_place(f, cu + du, cv + dv, base + 4, B.SPRUCE_PLANKS)
+	for c in [Vector2i(-2, -2), Vector2i(2, -2), Vector2i(-2, 2), Vector2i(2, 2)]:
+		for l in range(base + 1, base + 4):
+			_place(f, cu + c.x, cv + c.y, l, B.SPRUCE_LOG)
+	_place(f, cu, cv, base + 5, B.LAMP)
+	# Houses around the well, doors facing it, gravel paths in between.
+	var spots := [Vector2i(8, 0), Vector2i(-8, 0), Vector2i(0, 8), Vector2i(0, -8), Vector2i(8, 8), Vector2i(-8, -8)]
+	var n := rng.randi_range(4, 6)
+	for k in n:
+		var s: Vector2i = spots[k]
+		var door := Vector2i(-signi(s.x), -signi(s.y))
+		if door.x != 0 and door.y != 0:
+			door.y = 0
+		_house(f, cu + s.x, cv + s.y, base, door, rng)
+		var steps := maxi(absi(s.x), absi(s.y))
+		for t in range(3, steps - 2):
+			var pu := cu + roundi(float(s.x) * t / steps)
+			var pv := cv + roundi(float(s.y) * t / steps)
+			_place(f, pu, pv, base - 1, B.GRAVEL)
+	for c in [Vector2i(4, 4), Vector2i(-4, 4), Vector2i(4, -4), Vector2i(-4, -4)]:
+		_place(f, cu + c.x, cv + c.y, base, B.COBBLE)
+		_place(f, cu + c.x, cv + c.y, base + 1, B.LOG)
+		_place(f, cu + c.x, cv + c.y, base + 2, B.TORCH)
+	structures.append({"name": "Village", "sub": "Someone lived here before you crashed...", "pos": _fpos(f, cu, cv, base), "radius": 14.0})
+
+
+func _house(f: int, u0: int, v0: int, base: int, door: Vector2i, rng: RandomNumberGenerator) -> void:
+	var wall: int = [B.PLANKS, B.BIRCH_PLANKS, B.SPRUCE_PLANKS][rng.randi_range(0, 2)]
+	var roof: int = B.SPRUCE_PLANKS if wall != B.SPRUCE_PLANKS else B.PLANKS
+	for du in range(-3, 4):
+		for dv in range(-3, 4):
+			_place(f, u0 + du, v0 + dv, base - 1, B.COBBLE if (absi(du) == 3 or absi(dv) == 3) else B.PLANKS)
+			for l in range(base, base + 8):
+				_place(f, u0 + du, v0 + dv, l, B.AIR)
+			var edge := absi(du) == 3 or absi(dv) == 3
+			if not edge:
+				continue
+			var corner := absi(du) == 3 and absi(dv) == 3
+			for l in range(base, base + 4):
+				var b := B.LOG if corner else wall
+				if l == base + 1 and not corner and (du == 0 or dv == 0):
+					b = B.GLASS
+				_place(f, u0 + du, v0 + dv, l, b)
+	# Door gap on the side facing the well.
+	for l in [base, base + 1]:
+		_place(f, u0 + door.x * 3, v0 + door.y * 3, l, B.AIR)
+	_place(f, u0 + door.x * 4, v0 + door.y * 4, base + 2, B.TORCH)
+	# Stepped roof.
+	for k in 4:
+		var rad := 4 - k
+		for du in range(-rad, rad + 1):
+			for dv in range(-rad, rad + 1):
+				if maxi(absi(du), absi(dv)) == rad or k == 3:
+					_place(f, u0 + du, v0 + dv, base + 4 + k, roof)
+	# Furniture.
+	var side := Vector2i(door.y, door.x)
+	_place(f, u0 - door.x * 2 + side.x * 2, v0 - door.y * 2 + side.y * 2, base, B.CRAFTING_TABLE)
+	_place(f, u0 - door.x * 2 - side.x * 2, v0 - door.y * 2 - side.y * 2, base, B.FURNACE)
+	_place(f, u0 - door.x * 2, v0 - door.y * 2, base, B.WOOL_RED if rng.randf() < 0.5 else B.WOOL_BLUE)
+	_place(f, u0 + side.x * 2, v0 + side.y * 2, base + 2, B.TORCH)
+
+
+## Buried stone-brick hall with broken pillars, ore loot and a stairway up to the surface.
+func _ruins(f: int, cu: int, cv: int, l0: int, rng: RandomNumberGenerator) -> void:
+	var hr := 7
+	var ht := 7
+	for du in range(-hr, hr + 1):
+		for dv in range(-hr, hr + 1):
+			for dl in range(-1, ht + 1):
+				var shell := absi(du) == hr or absi(dv) == hr or dl == -1 or dl == ht
+				var b := B.AIR
+				if shell:
+					var r := rng.randf()
+					b = B.STONE_BRICKS if r < 0.62 else (B.COBBLE if r < 0.85 else (B.SMOOTH_STONE if r < 0.95 else B.GRAVEL))
+					if dl == ht and rng.randf() < 0.12:
+						b = B.AIR
+				_place(f, cu + du, cv + dv, l0 + dl, b)
+	# Pillars, some snapped off.
+	for c in [Vector2i(-4, -4), Vector2i(4, -4), Vector2i(-4, 4), Vector2i(4, 4)]:
+		var top := ht if rng.randf() < 0.6 else rng.randi_range(2, 4)
+		for dl in top:
+			_place(f, cu + c.x, cv + c.y, l0 + dl, B.STONE_BRICKS)
+		if top < ht:
+			_place(f, cu + c.x + rng.randi_range(-1, 1), cv + c.y + 1, l0, B.COBBLE)
+	# Rubble.
+	for k in 14:
+		_place(f, cu + rng.randi_range(-6, 6), cv + rng.randi_range(-6, 6), l0, B.COBBLE if rng.randf() < 0.6 else B.GRAVEL)
+	# Altar with loot.
+	for du in range(-1, 2):
+		for dv in range(-1, 2):
+			_place(f, cu + du, cv + dv, l0, B.SMOOTH_STONE)
+	_place(f, cu, cv, l0 + 1, B.GOLD_BLOCK)
+	_place(f, cu + 1, cv, l0 + 1, B.DIAMOND_ORE)
+	_place(f, cu - 1, cv, l0 + 1, B.GOLD_ORE)
+	_place(f, cu, cv + 1, l0 + 1, B.IRON_ORE)
+	_place(f, cu, cv - 1, l0 + 1, B.DIAMOND_ORE)
+	for c in [Vector2i(-6, 0), Vector2i(6, 0), Vector2i(0, -6), Vector2i(0, 6)]:
+		_place(f, cu + c.x, cv + c.y, l0 + 3, B.LAMP)
+	# Stairway: from the east wall, one block up per block out, until it breaks the surface.
+	var u := cu + hr
+	var l := l0
+	var steps := 0
+	while steps < 40:
+		for dv in range(0, 2):
+			_place(f, u, cv + dv, l - 1, B.STONE_BRICKS)
+			for k in range(0, 3):
+				_place(f, u, cv + dv, l + k, B.AIR)
+		if steps % 6 == 3:
+			_place(f, u, cv + 2, l + 1, B.TORCH)
+		if l >= _h(f, u, cv) + 1:
+			break
+		u += 1
+		l += 1
+		steps += 1
+	# Mark the entrance with a cobble arch.
+	for dv in [-1, 2]:
+		for k in 3:
+			_place(f, u, cv + dv, l + k, B.COBBLE)
+	for dv in range(-1, 3):
+		_place(f, u, cv + dv, l + 3, B.STONE_BRICKS)
+	structures.append({"name": "Ancient Ruins", "sub": "A buried hall, older than the planet's guardian", "pos": _fpos(f, cu, cv, l0 + 2), "radius": 9.0})
+	structures.append({"name": "Ruins Entrance", "sub": "Stairs lead down into the dark", "pos": _fpos(f, u, cv, l), "radius": 5.0})
+
+
+## Hollow sandstone pyramid with a striped band, a torch-lit chamber and a hidden vault below the floor.
+func _pyramid(f: int, cu: int, cv: int, rng: RandomNumberGenerator) -> void:
+	var base := maxi(_h(f, cu, cv), SEA + 2)
+	_flatten(f, cu, cv, 9, base, 12, B.SANDSTONE, B.SANDSTONE)
+	var size := 8
+	for k in size + 1:
+		var rad := size - k
+		for du in range(-rad, rad + 1):
+			for dv in range(-rad, rad + 1):
+				var shell := maxi(absi(du), absi(dv)) >= rad - 1 or k >= size - 2 or k == 0
+				var b := B.SANDSTONE if shell else B.AIR
+				if shell and k == 2 and maxi(absi(du), absi(dv)) == rad:
+					b = B.WOOL_ORANGE if (du + dv) % 2 == 0 else B.WOOL_BLUE
+				_place(f, cu + du, cv + dv, base + k, b)
+	for k in range(1, 3):
+		_place(f, cu + size, cv, base + k, B.AIR)
+		_place(f, cu + size - 1, cv, base + k, B.AIR)
+	_place(f, cu + size + 1, cv + 1, base + 1, B.TORCH)
+	_place(f, cu + size + 1, cv - 1, base + 1, B.TORCH)
+	for c in [Vector2i(-4, -4), Vector2i(4, -4), Vector2i(-4, 4), Vector2i(4, 4)]:
+		_place(f, cu + c.x, cv + c.y, base + 1, B.TORCH)
+	# Hidden vault: dig through the plain floor in the middle.
+	for du in range(-3, 4):
+		for dv in range(-3, 4):
+			for l in range(base - 6, base - 1):
+				var shell := absi(du) == 3 or absi(dv) == 3 or l == base - 6
+				_place(f, cu + du, cv + dv, l, B.SANDSTONE if shell else B.AIR)
+	_place(f, cu, cv, base - 5, B.DIAMOND_BLOCK if rng.randf() < 0.5 else B.GOLD_BLOCK)
+	for c in [Vector2i(-2, -2), Vector2i(2, -2), Vector2i(-2, 2), Vector2i(2, 2)]:
+		_place(f, cu + c.x, cv + c.y, base - 5, B.GOLD_ORE)
+		_place(f, cu + c.x, cv + c.y, base - 3, B.LAMP)
+	for c in [Vector2i(0, 2), Vector2i(0, -2)]:
+		_place(f, cu + c.x, cv + c.y, base - 5, B.TNT)
+	structures.append({"name": "Sand Pyramid", "sub": "Something is buried under the floor...", "pos": _fpos(f, cu, cv, base + 2), "radius": 10.0})
 
 
 func _compute_top(f: int, u: int, v: int) -> int:
