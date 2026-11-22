@@ -546,6 +546,40 @@ func _paint(n: String) -> Image:
 			return im
 		"tnt_bottom":
 			return _noise(Color(0.7, 0.18, 0.13), 0.04)
+		"farmland":
+			var im := _noise(Color(0.36, 0.24, 0.14), 0.04)
+			for y in 16:
+				if y % 4 == 1:
+					for x in 16:
+						im.set_pixel(x, y, Color(0.24, 0.15, 0.08))
+			return im
+		"wheat_0", "wheat_1", "wheat_2", "wheat_3":
+			var s := int(n.substr(6))
+			var im := _img()
+			var col := Color(0.35, 0.65, 0.2).lerp(Color(0.86, 0.72, 0.28), s / 3.0)
+			var top := 15 - (4 + s * 3)
+			for k in 5:
+				var x := 1 + k * 3
+				for y in range(top + (k % 2), 16):
+					im.set_pixel(x, y, _v(col, 0.06))
+				if s == 3:
+					for y in range(top, top + 4):
+						im.set_pixel(mini(x + 1, 15), y, Color(0.95, 0.8, 0.35))
+			return im
+		"portal_top", "portal_side":
+			var im := _noise(Color(0.09, 0.05, 0.14), 0.03)
+			for y in range(3, 13):
+				for x in range(3, 13):
+					im.set_pixel(x, y, _v(Color(1.0, 0.38, 0.08), 0.12))
+			return im
+		"ember_core":
+			var im := _metal(Color(0.55, 0.2, 0.12))
+			_blob(im, 8, 8, 3.5, 3.5, Color(1.0, 0.55, 0.15))
+			return im
+		"emberite_ore":
+			var im := _noise(Color(0.26, 0.26, 0.28), 0.03)
+			_specks(im, Color(1.0, 0.45, 0.1), 22, 0.08)
+			return im
 		"tall_grass":
 			return _cross_plant(Color(0.3, 0.58, 0.2), Color(0.45, 0.72, 0.3), false)
 		"flower_red":
@@ -914,6 +948,39 @@ func _item_img(id: int, outline := true) -> Image:
 				im.set_pixel(p.x, p.y, rim.lightened(0.3))
 			for p in [Vector2i(6, 6), Vector2i(9, 7), Vector2i(7, 8), Vector2i(8, 5)]:
 				im.set_pixel(p.x, p.y, rim.darkened(0.2))
+		B.SEEDS:
+			for p in [Vector2i(5, 7), Vector2i(9, 5), Vector2i(7, 10), Vector2i(11, 9), Vector2i(4, 11), Vector2i(10, 12)]:
+				_blob(im, p.y, p.x, 1.0, 0.8, Color(0.45, 0.6, 0.2))
+		B.WHEAT:
+			for k in 3:
+				_line(im, 15, 6 + k * 2, 2, 4 + k * 3, Color(0.85, 0.7, 0.28), 0.6)
+			_blob(im, 4, 7, 2.5, 3.5, Color(0.95, 0.8, 0.35))
+		B.BREAD:
+			_blob(im, 9, 8, 4, 6.5, Color(0.72, 0.45, 0.2))
+			for x in [5, 8, 11]:
+				_line(im, 7, x, 9, x + 1, Color(0.9, 0.7, 0.4), 0.4)
+		B.HOE:
+			_line(im, 14, 1, 3, 12, stick, 0.75)
+			_line(im, 3, 9, 3, 14, Color(0.6, 0.6, 0.62), 0.9)
+		B.BOW:
+			for k in 12:
+				var th := deg_to_rad(-80.0 + k * 14.5)
+				_line(im, 8 - 7 * sin(th), 3 + 6 * cos(th), 8 - 7 * sin(th), 3 + 6 * cos(th), stick, 0.9)
+			_line(im, 1, 4, 15, 4, Color(0.9, 0.9, 0.9), 0.3)
+		B.ARROW:
+			_line(im, 14, 1, 2, 13, stick, 0.5)
+			_blob(im, 2.5, 12.5, 1.6, 1.6, Color(0.3, 0.3, 0.33))
+			_line(im, 12, 1, 15, 4, Color(0.95, 0.95, 0.95), 0.7)
+		B.FLINT:
+			_blob(im, 9, 8, 5, 4, Color(0.2, 0.2, 0.23))
+			_blob(im, 7, 7, 1.5, 1.5, Color(0.4, 0.4, 0.45), false)
+		B.FLINT_AND_STEEL:
+			_blob(im, 10, 5, 3.5, 3, Color(0.2, 0.2, 0.23))
+			_line(im, 4, 8, 12, 12, Color(0.78, 0.79, 0.83), 0.8)
+			_line(im, 4, 8, 4, 13, Color(0.78, 0.79, 0.83), 0.8)
+		B.EMBERITE:
+			_blob(im, 8.5, 8, 5, 5, Color(1.0, 0.45, 0.12))
+			_blob(im, 7, 6.5, 1.8, 1.8, Color(1.0, 0.8, 0.4), false)
 		_ when B.armor_slot(id) >= 0:
 			var col: Color = B.MAT_COLORS[2] if id < B.DIAMOND_HELMET else B.MAT_COLORS[3]
 			_pattern(im, ARMOR_SHAPES[B.armor_slot(id)], col)

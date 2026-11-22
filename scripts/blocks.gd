@@ -59,6 +59,12 @@ const SPRUCE_PLANKS := 53
 const BIRCH_PLANKS := 54
 const SMOOTH_STONE := 55
 const CHEST := 56
+const FARMLAND := 57
+const WHEAT_0 := 58  # four growth stages, 58..61
+const WHEAT_3 := 61
+const ASH_PORTAL := 62
+const EMBER_CORE := 63
+const EMBERITE_ORE := 64
 
 # --- items (100+) ---
 const STICK := 100
@@ -104,6 +110,15 @@ const DIAMOND_HELMET := 143
 const DIAMOND_CHESTPLATE := 144
 const DIAMOND_LEGGINGS := 145
 const DIAMOND_BOOTS := 146
+const SEEDS := 147
+const WHEAT := 148
+const BREAD := 149
+const HOE := 150
+const BOW := 151
+const ARROW := 152
+const FLINT := 153
+const FLINT_AND_STEEL := 154
+const EMBERITE := 155
 
 ## Armor piece names by slot index (0 helmet .. 3 boots) and points per material (iron, diamond).
 const ARMOR_PARTS := ["Helmet", "Chestplate", "Leggings", "Boots"]
@@ -246,7 +261,7 @@ func _register_blocks() -> void:
 		["Green", "wool_green"], ["Blue", "wool_blue"], ["Purple", "wool_purple"], ["Black", "wool_black"]]
 	for k in wools.size():
 		_blk(WOOL_WHITE + k, "%s Wool" % wools[k][0], wools[k][1], 0.8, "", 0, {"sound": "grass"})
-	_blk(TALL_GRASS, "Tall Grass", "tall_grass", 0.0, "", 0, {"render": R_CROSS, "solid": false, "drop": 0, "sound": "grass"})
+	_blk(TALL_GRASS, "Tall Grass", "tall_grass", 0.0, "", 0, {"render": R_CROSS, "solid": false, "drop": SEEDS, "sound": "grass"})
 	_blk(FLOWER_RED, "Red Flower", "flower_red", 0.0, "", 0, {"render": R_CROSS, "solid": false, "sound": "grass"})
 	_blk(FLOWER_YELLOW, "Yellow Flower", "flower_yellow", 0.0, "", 0, {"render": R_CROSS, "solid": false, "sound": "grass"})
 	_blk(DEAD_BUSH, "Dead Bush", "dead_bush", 0.0, "", 0, {"render": R_CROSS, "solid": false, "drop": STICK, "sound": "grass"})
@@ -256,6 +271,12 @@ func _register_blocks() -> void:
 	_blk(BIRCH_PLANKS, "Birch Planks", "birch_planks", 2.0, "axe", 0, {"sound": "wood"})
 	_blk(SMOOTH_STONE, "Smooth Stone", "smooth_stone", 2.0, "pick", 1)
 	_blk(CHEST, "Chest", ["chest_top", "chest_front", "chest_top"], 1.2, "axe", 0, {"sound": "wood"})
+	_blk(FARMLAND, "Farmland", ["farmland", "dirt"], 0.5, "shovel", 0, {"drop": DIRT, "sound": "dirt"})
+	for s in 4:
+		_blk(WHEAT_0 + s, "Wheat Crop", "wheat_%d" % s, 0.0, "", 0, {"render": R_CROSS, "solid": false, "drop": WHEAT if s == 3 else SEEDS, "sound": "grass"})
+	_blk(ASH_PORTAL, "Ash Portal", ["portal_top", "portal_side"], 6.0, "pick", 2, {"emit": 0.7, "light": 0.8})
+	_blk(EMBER_CORE, "Ember Core", "ember_core", 4.0, "pick", 2, {"emit": 0.6})
+	_blk(EMBERITE_ORE, "Emberite Ore", "emberite_ore", 3.5, "pick", 3, {"emit": 0.4})
 
 
 func _item(id: int, nm: String, ex := {}) -> void:
@@ -298,6 +319,15 @@ func _register_items() -> void:
 		for k in 4:
 			_item(IRON_HELMET + m * 4 + k, "%s %s" % [["Iron", "Diamond"][m], ARMOR_PARTS[k]],
 				{"stack": 1, "armor": ARMOR_POINTS[m][k], "slot": k})
+	_item(SEEDS, "Wheat Seeds", {"desc": "Right-click farmland to plant."})
+	_item(WHEAT, "Wheat")
+	_item(BREAD, "Bread", {"food": 6})
+	_item(HOE, "Hoe", {"stack": 1, "desc": "Right-click grass or dirt to till farmland."})
+	_item(BOW, "Bow", {"stack": 1, "desc": "Hold Right Mouse to draw, release to fire. Uses arrows."})
+	_item(ARROW, "Arrow")
+	_item(FLINT, "Flint")
+	_item(FLINT_AND_STEEL, "Flint and Steel", {"stack": 1, "desc": "Lights TNT. Light an Ash Portal to travel between worlds."})
+	_item(EMBERITE, "Emberite", {"desc": "Found only in the Ash Lands."})
 
 
 func _rec(out: int, n: int, ingredients: Dictionary, station := "") -> void:
@@ -340,7 +370,7 @@ func _register_recipes() -> void:
 	_rec(WOOL_PURPLE, 2, {WOOL_WHITE: 2, FLOWER_RED: 1, ICE: 1})
 	_rec(WOOL_BLACK, 1, {WOOL_WHITE: 1, COAL: 1})
 	_rec(ROCKET_HULL, 1, {IRON_INGOT: 8, GLASS: 2}, "table")
-	_rec(ROCKET_ENGINE, 1, {IRON_INGOT: 3, GOLD_INGOT: 4, FURNACE: 1}, "table")
+	_rec(ROCKET_ENGINE, 1, {IRON_INGOT: 3, GOLD_INGOT: 4, FURNACE: 1, EMBER_CORE: 1}, "table")
 	_rec(FUEL_CELL, 1, {COAL: 6, STARCORE: 1}, "table")
 	_rec(NAV_CORE, 1, {DIAMOND: 2, GOLD_INGOT: 2, STARCORE: 1}, "table")
 	_rec(ROCKET, 1, {ROCKET_HULL: 1, ROCKET_ENGINE: 1, FUEL_CELL: 3, NAV_CORE: 1}, "table")
@@ -351,6 +381,15 @@ func _register_recipes() -> void:
 	for k in 4:
 		_rec(IRON_HELMET + k, 1, {IRON_INGOT: armor_cost[k]}, "table")
 		_rec(DIAMOND_HELMET + k, 1, {DIAMOND: armor_cost[k]}, "table")
+	_rec(HOE, 1, {G_PLANKS: 2, STICK: 2}, "table")
+	_rec(BREAD, 1, {WHEAT: 3})
+	_rec(FLINT, 1, {GRAVEL: 3})
+	_rec(FLINT_AND_STEEL, 1, {FLINT: 1, IRON_INGOT: 1})
+	_rec(ARROW, 4, {FLINT: 1, STICK: 1, WHEAT: 1})
+	_rec(BOW, 1, {STICK: 3, WOOL_WHITE: 3}, "table")
+	_rec(ASH_PORTAL, 1, {OBSIDIAN: 4, DIAMOND: 1}, "table")
+	_rec(EMBERITE, 1, {EMBERITE_ORE: 1}, "furnace")
+	_rec(EMBER_CORE, 1, {EMBERITE: 4, STARCORE: 1}, "table")
 
 
 func is_block(id: int) -> bool:

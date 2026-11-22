@@ -163,8 +163,8 @@ func _setup_env() -> void:
 	add_child(we)
 	sun = DirectionalLight3D.new()
 	sun.shadow_enabled = true
-	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
-	sun.directional_shadow_max_distance = 70.0
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+	sun.directional_shadow_max_distance = 48.0
 	sun.shadow_blur = 1.2
 	sun.light_color = Color(1.0, 0.95, 0.86)
 	sun.light_energy = 1.3

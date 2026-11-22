@@ -59,6 +59,16 @@ var _wq := {}
 var _lq := {}
 var _wt := 0.0
 var _lt := 0.0
+## True while the Ash Lands dimension is loaded: every face is Ashlands and ore is far richer.
+var ash := false
+## Growing wheat: voxel index -> true. Rebuilt from blocks after load.
+var crops := {}
+var _crop_t := 0.0
+
+
+func biome(f: int) -> int:
+	return ASHLANDS if ash else FACE_BIOME[f]
+
 
 const WATER_STEP := 0.25
 const LAVA_STEP := 1.0
@@ -283,12 +293,31 @@ func generate(seed_val: int, progress: Callable) -> void:
 	_decorate()
 	progress.call(0.48, "Raising villages and ruins...")
 	await get_tree().process_frame
-	_structures()
+	if not ash:
+		_structures()
+	else:
+		structures.clear()
+		_gen_lights.clear()
 
 
 func apply_edits() -> void:
+	crops.clear()
 	for k in edits:
 		blocks[k] = edits[k]
+		if edits[k] >= B.WHEAT_0 and edits[k] < B.WHEAT_3:
+			crops[k] = true
+
+
+## Advances wheat: every second each young crop has a chance to grow one stage.
+func grow_crops(dt: float) -> void:
+	_crop_t += dt
+	if _crop_t < 1.0:
+		return
+	_crop_t -= 1.0
+	for i in crops.keys():
+		if randf() < 0.08:
+			var b := blocks[i] + 1
+			set_block(i & 127, (i >> 7) & 127, i >> 14, b)
 
 
 ## Flowing cells for the save: voxel index -> Vector2i(liquid id, level).
@@ -362,7 +391,7 @@ func _gen_heights() -> void:
 	for f in 6:
 		hn.offset = Vector3(f * 517.0, f * 291.0, 0)
 		var data := hn.get_image(W, W, false, false, false).get_data()
-		var bio: int = FACE_BIOME[f]
+		var bio: int = biome(f)
 		for u in W:
 			var du := absf(u - C + 0.5)
 			for v in W:
@@ -394,7 +423,7 @@ func _gen_face(f: int, cave1: PackedByteArray, cave2: PackedByteArray, ore: Pack
 	var sa: int = STRIDE[a]
 	var su: int = STRIDE[ua]
 	var sv: int = STRIDE[va]
-	var bio: int = FACE_BIOME[f]
+	var bio: int = biome(f)
 	var bl := blocks
 	var seedmix := world_seed * 19349663
 	for u in W:
@@ -464,14 +493,18 @@ func _gen_face(f: int, cave1: PackedByteArray, cave2: PackedByteArray, ore: Pack
 					var o := int(ore[i])
 					var hs := ((i * 73856093) ^ seedmix) & 1023
 					# Veins only where the ore noise peaks; rarer ores take a small slice of each band.
-					if o > 207:
+					# The Ash Lands have far more veins and richer bands.
+					if o > (180 if ash else 207):
+						var hr := hs if not ash else mini(1023, hs + 250)
 						if l >= 27:
-							b = B.COAL_ORE if hs < 760 else B.IRON_ORE
+							b = B.COAL_ORE if hr < 760 else B.IRON_ORE
 						elif l >= 20:
-							b = B.IRON_ORE if hs < 520 else (B.COAL_ORE if hs < 820 else B.GOLD_ORE)
+							b = B.IRON_ORE if hr < 520 else (B.COAL_ORE if hr < 820 else B.GOLD_ORE)
 						else:
-							b = B.IRON_ORE if hs < 520 else (B.GOLD_ORE if hs < 860 else B.DIAMOND_ORE)
-						if bio == ASHLANDS and hs > 990 and l < 30:
+							b = B.IRON_ORE if hr < 520 else (B.GOLD_ORE if hr < 860 else B.DIAMOND_ORE)
+						if ash and hs > 880:
+							b = B.EMBERITE_ORE
+						elif bio == ASHLANDS and hs > 990 and l < 30:
 							b = B.DIAMOND_ORE
 						elif bio == DESERT and hs > 975 and l < 32:
 							b = B.GOLD_ORE
@@ -527,7 +560,7 @@ func _decorate() -> void:
 	var cells := [10, 5, 13, 7, 11, 13]
 	var chances := [0.45, 0.9, 0.4, 0.65, 0.45, 0.45]
 	for f in 6:
-		var bio: int = FACE_BIOME[f]
+		var bio: int = biome(f)
 		var cell: int = cells[bio]
 		for cu in range(0, W, cell):
 			for cv in range(0, W, cell):
@@ -730,7 +763,7 @@ func _flatten(f: int, u0: int, v0: int, rad: int, base: int, height: int, top: i
 
 func _village(f: int, cu: int, cv: int, rng: RandomNumberGenerator) -> void:
 	var base := maxi(_avg_h(f, cu, cv, 12), SEA + 2)
-	var ground: int = B.SNOW if FACE_BIOME[f] == TUNDRA else B.GRASS
+	var ground: int = B.SNOW if biome(f) == TUNDRA else B.GRASS
 	_flatten(f, cu, cv, 13, base, 10, ground, B.DIRT)
 	# Well in the middle.
 	for du in range(-2, 3):
@@ -991,6 +1024,9 @@ func set_block(x: int, y: int, z: int, id: int, record := true) -> void:
 	flow.erase(i)
 	if record:
 		edits[i] = id
+	crops.erase(i)
+	if id >= B.WHEAT_0 and id < B.WHEAT_3:
+		crops[i] = true
 	if B.LIGHT[old] > 0.0:
 		_remove_light(i)
 	if B.LIGHT[id] > 0.0:
