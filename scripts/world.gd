@@ -1140,7 +1140,7 @@ func _remove_light(i: int) -> void:
 
 
 func _process(delta: float) -> void:
-	flush_dirty(7)
+	flush_dirty(4)
 	_light_timer -= delta
 	if _light_timer <= 0.0:
 		_light_timer = 0.5

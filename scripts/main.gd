@@ -733,8 +733,10 @@ func daylight(face: int) -> float:
 func _update_info() -> void:
 	var here: Vector3 = player.body.center()
 	for s in world.structures:
+		if here.distance_squared_to(s["pos"]) >= s["radius"] * s["radius"]:
+			continue
 		var key: String = "%s@%v" % [s["name"], s["pos"]]
-		if not discovered.has(key) and here.distance_to(s["pos"]) < s["radius"]:
+		if not discovered.has(key):
 			discovered[key] = true
 			ui.banner(s["name"], s["sub"], 3.5, "✦  DISCOVERED  ✦")
 			Sfx.play("mission", -6.0, 0.8)
