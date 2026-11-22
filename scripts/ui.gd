@@ -52,6 +52,7 @@ var off_slot: Panel
 var heart_flash := 0.0
 var heal_t := 0.0
 var last_health := 20.0
+var air_label: Label
 var obj_panel: PanelContainer
 var obj_title: Label
 var obj_text: Label
@@ -956,6 +957,19 @@ func update_hud(dt: float) -> void:
 	vm.set_shader_parameter("amount", p.hurt_flash * 0.85 + pulse)
 	var eye_b: int = main.world.block_at(p.eye_pos())
 	water_overlay.visible = eye_b == B.WATER or eye_b == B.LAVA
+	if air_label == null:
+		air_label = Label.new()
+		air_label.add_theme_font_size_override("font_size", 20)
+		air_label.add_theme_color_override("font_color", Color(0.7, 0.9, 1.0))
+		air_label.add_theme_constant_override("outline_size", 6)
+		air_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
+		add_child(air_label)
+	air_label.visible = p.air < p.MAX_AIR and not p.creative and hearts.visible
+	if air_label.visible:
+		var bubbles := ceili(p.air)
+		air_label.text = "Air  " + "●".repeat(bubbles) + "○".repeat(int(p.MAX_AIR) - bubbles)
+		var hr2: Rect2 = hearts.get_global_rect()
+		air_label.global_position = Vector2(hr2.position.x, hr2.position.y - 30)
 	var wm: ShaderMaterial = water_overlay.material
 	wm.set_shader_parameter("tint", Color(1.0, 0.35, 0.05, 0.65) if eye_b == B.LAVA else Color(0.1, 0.3, 0.65, 0.38))
 	flash_rect.color.a = maxf(0.0, flash_rect.color.a - dt * 0.8)

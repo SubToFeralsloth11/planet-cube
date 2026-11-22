@@ -13,6 +13,7 @@ const BoltScript := preload("res://scripts/bolt.gd")
 const TntScript := preload("res://scripts/tnt.gd")
 const DropScript := preload("res://scripts/drop.gd")
 const RocketScript := preload("res://scripts/rocket.gd")
+const ArrowScript := preload("res://scripts/arrow.gd")
 const CENTER := Vector3(64, 64, 64)
 
 var world
@@ -53,6 +54,10 @@ var part_mesh: BoxMesh
 var burst_mesh: BoxMesh
 var objectives: Array = []
 var discovered := {}
+## Base planet seed; the Ash Lands generate from it with an offset.
+var base_seed := 0
+## Saved state of the dimension that is not loaded: {edits, flow, chests, furnaces, torch_wall, pos, face, rocket}.
+var dim_other := {}
 
 
 func _ready() -> void:
@@ -239,6 +244,7 @@ func _boot() -> void:
 		await _load_world(randi() % 1000000, {})
 		terrain_of = ""
 	else:
+		_set_dim(data)
 		await _load_world(data["seed"], data["edits"], data.get("flow", {}))
 		terrain_of = save_path
 	_enter_title()
@@ -265,12 +271,57 @@ func _load_world(seed_val: int, edits: Dictionary, flow := {}) -> void:
 	ui.show_screen("loading")
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_clear_entities()
-	await world.generate(seed_val, _progress)
+	base_seed = seed_val
+	await world.generate(seed_val + (7777 if world.ash else 0), _progress)
 	world.edits = edits.duplicate()
 	world.apply_edits()
 	world.load_flow(flow)
 	await world.finish_build(_progress)
 	world_fresh = edits.is_empty() and flow.is_empty()
+
+
+func _set_dim(data: Dictionary) -> void:
+	world.ash = data.get("ash", false)
+	dim_other = data.get("other_dim", {})
+
+
+## Steps through an Ash Portal: stores this dimension, then loads (or first generates) the other one.
+func travel_dimension() -> void:
+	if state != "play":
+		return
+	var leaving := {
+		"edits": world.edits, "flow": world.save_flow(), "chests": world.chests, "furnaces": world.furnaces,
+		"torch_wall": world.torch_wall, "pos": player.body.pos, "face": player.body.face,
+		"rocket": {"face": rocket.face, "pos": rocket.base} if (rocket and is_instance_valid(rocket) and rocket.state != "launching") else null,
+	}
+	var going := dim_other
+	dim_other = leaving
+	world.ash = not world.ash
+	rocket = null
+	boss = null
+	ui.fade_in(1.0)
+	await _load_world(base_seed, going.get("edits", {}), going.get("flow", {}))
+	world.chests = going.get("chests", {})
+	world.furnaces = going.get("furnaces", {})
+	world.torch_wall = going.get("torch_wall", {})
+	if going.has("pos"):
+		player.spawn_at(going["pos"], going["face"])
+	else:
+		var sp: Vector3 = world.find_spawn()
+		player.spawn_at(sp, 2)
+		# A return portal beside the arrival point, standing on the ground.
+		var pp := Vector3i(sp.floor()) + Vector3i(2, 0, 0)
+		world.set_block(pp.x, pp.y - 1, pp.z, B.OBSIDIAN)
+		world.set_block(pp.x, pp.y, pp.z, B.ASH_PORTAL)
+		world.set_block(pp.x, pp.y + 1, pp.z, B.AIR)
+	var rd = going.get("rocket", null)
+	if rd:
+		_spawn_rocket(rd["face"], rd["pos"])
+		if boss_defeated:
+			rocket.state = "ready"
+	save_game()
+	_enter_play()
+	Sfx.play("mission", -4.0, 0.6)
 
 
 func _enter_title() -> void:
@@ -334,6 +385,7 @@ func create_world(world_name: String, mode: String, seed_text := "") -> void:
 	save_path = worlds_dir + "world_%d_%d.save" % [Time.get_unix_time_from_system(), randi() % 1000]
 	var now := Time.get_unix_time_from_system()
 	_write_meta(save_path, {"name": nm, "mode": mode, "created": now, "played": now, "time": 0.0, "seed": seed_val})
+	_set_dim({})
 	await _load_world(seed_val, {})
 	terrain_of = save_path
 	_new_game(mode)
@@ -346,6 +398,7 @@ func play_world(path: String) -> void:
 		return
 	# The title screen already shows the most recent world; only regenerate for a different one.
 	if terrain_of != path:
+		_set_dim(data)
 		await _load_world(data["seed"], data["edits"], data.get("flow", {}))
 		terrain_of = path
 	_restore_game(data)
@@ -428,7 +481,10 @@ func _enter_play() -> void:
 	_resume_play()
 	ui.fade_in(0.8)
 	var f: int = player.body.face
-	ui.banner(world.BIOME_NAMES[world.FACE_BIOME[f]] + " Face", "Walk off any edge - gravity follows you", 4.0)
+	if world.ash:
+		ui.banner("The Ash Lands", "Rich ore, rivers of lava - light the portal to go home", 4.0)
+	else:
+		ui.banner(world.BIOME_NAMES[world.biome(f)] + " Face", "Walk off any edge - gravity follows you", 4.0)
 
 
 func _resume_play() -> void:
@@ -482,7 +538,7 @@ func save_game() -> void:
 	if world.world_seed == 0 and world.blocks.is_empty():
 		return
 	var d := {
-		"version": 1, "seed": world.world_seed, "edits": world.edits, "flow": world.save_flow(), "player": player.to_dict(),
+		"version": 1, "seed": base_seed, "ash": world.ash, "other_dim": dim_other, "edits": world.edits, "flow": world.save_flow(), "player": player.to_dict(),
 		"time": time_of_day, "objective": objective, "boss_defeated": boss_defeated, "escaped": escaped,
 		"rocket": {"face": rocket.face, "pos": rocket.base} if (rocket and is_instance_valid(rocket) and rocket.state != "launching") else null,
 		"drops": _drop_list(),
@@ -647,6 +703,7 @@ func _process(dt: float) -> void:
 			_update_sky(dt, Vector3(0, 1, 0), 0.25, false)
 	if state in ["play", "dead", "inventory", "confirm"]:
 		world.flow_tick(dt)
+		world.grow_crops(dt)
 		for i in world.furnaces:
 			_step_furnace(world.furnaces[i], dt)
 	_update_clouds(dt)
@@ -741,7 +798,7 @@ func _update_info() -> void:
 			ui.banner(s["name"], s["sub"], 3.5, "✦  DISCOVERED  ✦")
 			Sfx.play("mission", -6.0, 0.8)
 	var f: int = player.body.face
-	var biome: String = world.BIOME_NAMES[world.FACE_BIOME[f]]
+	var biome: String = world.BIOME_NAMES[world.biome(f)]
 	var d := daylight(f)
 	var tod := "Day" if d > 0.7 else ("Night" if d < 0.2 else "Dusk")
 	var c: Vector3 = player.body.center() - CENTER
@@ -844,7 +901,7 @@ func _spawning(dt: float) -> void:
 		var ground: int = world.block_at(feet - fup * 0.5)
 		if ground != B.GRASS and ground != B.SNOW:
 			return
-		var biome: int = world.FACE_BIOME[face]
+		var biome: int = world.biome(face)
 		var kinds := ["pig", "cow", "sheep"]
 		if biome == world.TUNDRA:
 			kinds = ["sheep", "sheep", "cow"]
@@ -979,6 +1036,13 @@ func spawn_bolt(pos: Vector3, vel: Vector3) -> void:
 	entities.append(b)
 
 
+func spawn_arrow(pos: Vector3, vel: Vector3, dmg: float) -> void:
+	var a := ArrowScript.new()
+	add_child(a)
+	a.setup(self, world, pos, vel, dmg, player)
+	entities.append(a)
+
+
 func shake_camera(a: float) -> void:
 	player.shake = maxf(player.shake, a)
 
@@ -1088,9 +1152,9 @@ func on_block_placed(_b: int) -> void:
 
 
 func on_face_changed(face: int) -> void:
-	var biome: String = world.BIOME_NAMES[world.FACE_BIOME[face]]
+	var biome: String = world.BIOME_NAMES[world.biome(face)]
 	if world.sky_vis_at(player.body.center()) > 0.5:
-		ui.banner(biome + " Face", ["Gentle hills and wildflowers", "Dense woods - watch for the dark", "Sand, cactus and scorching sun", "Snow, ice and frozen lakes", "Tall peaks and deep valleys", "Basalt, magma and lava lakes"][world.FACE_BIOME[face]], 3.0)
+		ui.banner(biome + " Face", ["Gentle hills and wildflowers", "Dense woods - watch for the dark", "Sand, cactus and scorching sun", "Snow, ice and frozen lakes", "Tall peaks and deep valleys", "Basalt, magma and lava lakes"][world.biome(face)], 3.0)
 		Sfx.play("whoosh", -6.0)
 
 
@@ -1104,7 +1168,7 @@ func on_player_died(cause: String) -> void:
 	var msgs := {
 		"fall": "You fell from a great height.", "lava": "You tried to swim in lava.", "zombie": "A zombie got you.",
 		"explosion": "You were blown up.", "shockwave": "Crushed by the Sentinel's shockwave.", "magma": "The floor was lava. Sort of.",
-		"cactus": "Hugged a cactus.",
+		"cactus": "Hugged a cactus.", "drown": "You forgot to breathe.",
 	}
 	ui.death_label.text = msgs.get(cause, "You died.")
 	ui.show_death(player.stats)

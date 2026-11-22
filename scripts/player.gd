@@ -8,7 +8,8 @@ const ARMOR0 := 36
 const OFFHAND := 40
 const INV_SIZE := 41
 const BLOCK_ARC := 100.0
-const UNBLOCKABLE := ["fall", "lava", "cactus", "magma"]
+const UNBLOCKABLE := ["fall", "lava", "cactus", "magma", "drown"]
+const MAX_AIR := 10.0
 const VMScript := preload("res://scripts/viewmodel.gd")
 const COYOTE := 0.12
 const JUMP_BUFFER := 0.15
@@ -67,6 +68,10 @@ var walk_phase := 0.0
 var cam_dist := 0.0
 var coyote := 0.0
 var jump_buf := 0.0
+var bow_draw := 0.0
+## Seconds of breath left underwater.
+var air := MAX_AIR
+var drown_t := 0.0
 var bob_amp := 0.0
 var roll := 0.0
 var hurt_roll := 0.0
@@ -334,7 +339,8 @@ func has_shield() -> bool:
 
 ## Items whose right-click does something themselves (so it doesn't raise an offhand shield).
 func _usable(id: int) -> bool:
-	return is_food(id) or B.is_block(id) or id == B.ROCKET or _is_bucket(id) or B.armor_slot(id) >= 0
+	return is_food(id) or B.is_block(id) or id == B.ROCKET or _is_bucket(id) or B.armor_slot(id) >= 0 \
+		or id == B.HOE or id == B.SEEDS or id == B.FLINT_AND_STEEL or id == B.BOW
 
 
 func _is_bucket(id: int) -> bool:
@@ -491,13 +497,22 @@ func _movement(dt: float) -> void:
 		speed = 6.4
 	if body.flying:
 		speed = 14.0 if sprint else 9.0
+	var eye_wet: bool = world.block_at(eye_pos()) == B.WATER
 	if body.in_water:
-		speed *= 0.6
+		speed = (5.2 if sprint else 3.4) if eye_wet else speed * 0.6
 	if eat_prog > 0.0:
 		speed *= 0.55
 	if blocking:
 		speed *= 0.4
 	var u := body.up()
+	if body.in_water and eye_wet and not body.flying:
+		# Swimming: steer up and down with where you look; Space rises, descend dives.
+		var swim_v := look_dir().dot(u) * speed * maxf(iz, 0.0)
+		if Input.is_action_pressed("jump"):
+			swim_v = maxf(swim_v, 3.2)
+		elif Input.is_action_pressed("descend"):
+			swim_v = minf(swim_v, -3.2)
+		body.vel = body.vel.lerp(body.vel - u * body.vel.dot(u) + u * swim_v, 1.0 - exp(-6.0 * dt))
 	var vu := body.vel.dot(u)
 	var hv := body.vel - u * vu
 	var grounded := body.on_ground
@@ -510,6 +525,8 @@ func _movement(dt: float) -> void:
 	if body.flying:
 		var vert := (1.0 if Input.is_action_pressed("jump") else 0.0) - (1.0 if Input.is_action_pressed("descend") else 0.0)
 		vu = lerpf(vu, vert * speed, 1.0 - exp(-10.0 * dt))
+	elif body.in_water and eye_wet:
+		pass
 	elif body.in_water or body.in_lava:
 		if Input.is_action_pressed("jump"):
 			vu = minf(vu + 30.0 * dt, 4.5)
@@ -593,10 +610,34 @@ func _interact(dt: float) -> void:
 	if crack.visible:
 		crack.global_position = Vector3(break_pos) + Vector3(0.5, 0.5, 0.5)
 		crack_mat.albedo_texture = T.cracks[clampi(int(break_prog * 10.0), 0, 9)]
+	if held_id() == B.BOW:
+		if rmb and not blocking:
+			bow_draw = minf(bow_draw + dt, 1.0)
+		elif bow_draw > 0.0:
+			_fire_bow()
+		return
+	bow_draw = 0.0
 	if _eat_update(dt, rmb):
 		return
 	if rmb and not blocking and place_cd <= 0.0:
 		_use()
+
+
+func _fire_bow() -> void:
+	var power := bow_draw
+	bow_draw = 0.0
+	if power < 0.15:
+		return
+	if not creative:
+		if count(B.ARROW) <= 0:
+			main.ui.toast("You need arrows")
+			return
+		remove(B.ARROW, 1)
+	var d := look_dir()
+	main.spawn_arrow(eye_pos() + d * 0.6, d * (12.0 + 26.0 * power) + body.vel * 0.3, 2.0 + 6.0 * power)
+	vm.swing()
+	Sfx.play("swing", -8.0, 1.5)
+	main.on_inventory_changed()
 
 
 func _reach() -> float:
@@ -736,6 +777,8 @@ func break_block(p: Vector3i, b: int) -> void:
 				n = 1
 		if drop > 0:
 			main.pop_drop(drop, n, Vector3(p) + Vector3(0.5, 0.5, 0.5) - body.up() * 0.2, body.up())
+		if b == B.WHEAT_3:
+			main.pop_drop(B.SEEDS, randi_range(1, 2), Vector3(p) + Vector3(0.5, 0.5, 0.5), body.up())
 	elif not creative and B.info[b]["tier"] > 0:
 		var need: int = B.info[b]["tier"]
 		main.ui.toast("Needs a %s pickaxe or better!" % B.TIER_NAMES[need])
@@ -749,6 +792,8 @@ func break_block(p: Vector3i, b: int) -> void:
 		world.set_block(above.x, above.y, above.z, B.AIR)
 		if ab == B.FLOWER_RED or ab == B.FLOWER_YELLOW:
 			main.pop_drop(ab, 1, Vector3(above) + Vector3(0.5, 0.5, 0.5), body.up())
+		elif ab >= B.WHEAT_0 and ab <= B.WHEAT_3:
+			main.pop_drop(B.WHEAT if ab == B.WHEAT_3 else B.SEEDS, 1, Vector3(above) + Vector3(0.5, 0.5, 0.5), body.up())
 	if b == B.CHEST or b == B.FURNACE:
 		main.spill_storage(p, b)
 	main.on_block_broken(b)
@@ -791,6 +836,30 @@ func _use(click := false) -> void:
 	if _is_bucket(id):
 		if click:
 			_use_bucket(id)
+		return
+	if id == B.FLINT_AND_STEEL and target:
+		if tb == B.ASH_PORTAL:
+			main.spawn_burst(Vector3(target["pos"]) + Vector3(0.5, 1.0, 0.5), Color(1.0, 0.5, 0.1), 20)
+			main.travel_dimension()
+			return
+		if tb != B.TNT:
+			main.spawn_burst(Vector3(target["pos"]) + Vector3(0.5, 0.5, 0.5) + Vector3(target["normal"]) * 0.55, Color(1.0, 0.75, 0.3), 6, 0.5)
+			Sfx.play("swing", -10.0, 2.0)
+			return
+	if (id == B.HOE or id == B.SEEDS) and target:
+		var tp0: Vector3i = target["pos"]
+		var up0 := tp0 + Vector3i(VBody.UPS[World_face(tp0)])
+		var above_b: int = world.get_b(up0.x, up0.y, up0.z)
+		if id == B.HOE and (tb == B.GRASS or tb == B.DIRT or tb == B.SNOW) and (above_b == B.AIR or B.RENDER[above_b] == B.R_CROSS):
+			world.set_block(up0.x, up0.y, up0.z, B.AIR)
+			world.set_block(tp0.x, tp0.y, tp0.z, B.FARMLAND)
+			vm.swing()
+			Sfx.dig("dirt", -4.0)
+		elif id == B.SEEDS and tb == B.FARMLAND and above_b == B.AIR:
+			world.set_block(up0.x, up0.y, up0.z, B.WHEAT_0)
+			consume_held()
+			vm.swing()
+			Sfx.dig("grass", -6.0)
 		return
 	if equip_held_armor():
 		return
@@ -895,6 +964,16 @@ func _survival(dt: float) -> void:
 			lava_t = 0.5
 			hurt(3.0, Vector3.ZERO, "lava")
 	var feet_b: int = world.block_at(body.pos - body.up() * 0.1)
+	if world.block_at(eye_pos()) == B.WATER:
+		air = maxf(0.0, air - dt)
+		if air <= 0.0:
+			drown_t -= dt
+			if drown_t <= 0.0:
+				drown_t = 1.0
+				hurt(2.0, Vector3.ZERO, "drown")
+	else:
+		air = minf(MAX_AIR, air + dt * 4.0)
+		drown_t = 0.0
 	if feet_b == B.MAGMA and body.on_ground:
 		lava_t -= dt
 		if lava_t <= 0.0:
